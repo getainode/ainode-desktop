@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    AINode masters serve plain http on LAN and tailnet addresses. App Transport
+    Security blocks that in the webview unless web content is exempted. Only
+    this one key: adding NSAllowsLocalNetworking or others next to it makes
+    macOS ignore the broader exemption.
+  -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoadsInWebContent</key>
+    <true/>
+  </dict>
+  <key>NSHumanReadableCopyright</key>
+  <string>Apache-2.0. Made in Texas.</string>
+</dict>
+</plist>

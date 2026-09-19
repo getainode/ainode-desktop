@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "IPC for the app's own bundled screens (settings, waiting, about). The AINode web UI itself runs without IPC.",
+  "windows": ["main", "settings", "about"],
+  "permissions": ["core:default"]
+}

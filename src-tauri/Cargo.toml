@@ -1,0 +1,34 @@
+[package]
+name = "ainode-desktop"
+version = "0.1.0"
+description = "AINode on your desktop: point it at your master node and go."
+authors = ["AINode contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/getainode/ainode-desktop"
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "ainode_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.11.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-store = "=2.4.5"
+tauri-plugin-notification = "=2.4.0"
+tauri-plugin-opener = "=2.5.5"
+reqwest = { version = "=0.13.5", default-features = false, features = ["json"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["time", "sync", "macros"] }
+url = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

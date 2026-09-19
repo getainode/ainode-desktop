@@ -1,0 +1,10 @@
+# Node
+node_modules/
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Local tooling caches
+graft/
+.DS_Store

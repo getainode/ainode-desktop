@@ -1,0 +1,15 @@
+{
+  "name": "ainode-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AINode on your desktop: point it at your master node and go.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}
