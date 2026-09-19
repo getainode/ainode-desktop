@@ -1,0 +1,180 @@
+name: Release
+
+# Builds the universal macOS app on every v* tag and attaches the .dmg and a
+# zipped .app to the GitHub Release for that tag. Signing and notarization
+# switch on by themselves when the Apple secrets exist (see docs/RELEASING.md);
+# without them the build still succeeds and ships unsigned.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach to its release (blank: build the current branch, artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: AINode
+  BUNDLE_DIR: src-tauri/target/universal-apple-darwin/release/bundle
+
+jobs:
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust stable (arm64 + x86_64 targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Check the tag matches the app version
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Same precedence Tauri uses: tauri.conf.json version (a string, or a
+          # path to a JSON file holding one), else the Cargo.toml package version.
+          app_version="$(node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+            let v = conf.version;
+            if (typeof v === "string" && v.endsWith(".json")) {
+              v = JSON.parse(fs.readFileSync(path.join("src-tauri", v), "utf8")).version;
+            }
+            if (!v) {
+              const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+              const pkg = cargo.split(/^\[package\]\s*$/m)[1] || "";
+              const m = pkg.split(/^\[/m)[0].match(/^\s*version\s*=\s*"([^"]+)"/m);
+              v = m ? m[1] : "";
+            }
+            process.stdout.write(String(v || ""));
+          ')"
+          tag_version="${RELEASE_TAG#v}"
+          echo "tag: ${RELEASE_TAG} (${tag_version})  app: ${app_version}"
+          if [ "${tag_version}" != "${app_version}" ]; then
+            echo "::error::Tag ${RELEASE_TAG} does not match the app version ${app_version}. Bump src-tauri/tauri.conf.json first, then tag."
+            exit 1
+          fi
+
+      # Tauri reads these six names straight from the environment. They must be
+      # absent (not empty) when signing is off: an empty APPLE_CERTIFICATE makes
+      # the bundler try to import an empty certificate and fail. So the secrets
+      # are bound to this one step only and exported for later steps when set.
+      - name: Enable Apple signing when the secrets are present
+        env:
+          IN_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          IN_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IN_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          IN_APPLE_ID: ${{ secrets.APPLE_ID }}
+          IN_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          IN_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          export_var() {
+            # Heredoc form so a wrapped base64 certificate survives GITHUB_ENV.
+            {
+              echo "$1<<AINODE_EOF"
+              echo "$2"
+              echo "AINODE_EOF"
+            } >> "$GITHUB_ENV"
+          }
+          if [ -z "${IN_APPLE_CERTIFICATE}" ] || [ -z "${IN_APPLE_SIGNING_IDENTITY}" ]; then
+            echo "::warning::Apple signing secrets are not set. Building unsigned. Users must right-click Open (or use Privacy and Security, Open Anyway) the first time."
+            echo "Signing: off"
+            exit 0
+          fi
+          export_var APPLE_CERTIFICATE "${IN_APPLE_CERTIFICATE}"
+          export_var APPLE_CERTIFICATE_PASSWORD "${IN_APPLE_CERTIFICATE_PASSWORD}"
+          export_var APPLE_SIGNING_IDENTITY "${IN_APPLE_SIGNING_IDENTITY}"
+          echo "Signing: on (${IN_APPLE_SIGNING_IDENTITY})"
+          if [ -n "${IN_APPLE_ID}" ] && [ -n "${IN_APPLE_PASSWORD}" ] && [ -n "${IN_APPLE_TEAM_ID}" ]; then
+            export_var APPLE_ID "${IN_APPLE_ID}"
+            export_var APPLE_PASSWORD "${IN_APPLE_PASSWORD}"
+            export_var APPLE_TEAM_ID "${IN_APPLE_TEAM_ID}"
+            echo "Notarization: on"
+          else
+            echo "::warning::APPLE_ID, APPLE_PASSWORD or APPLE_TEAM_ID is missing: the app will be signed but not notarized."
+            echo "Notarization: off"
+          fi
+
+      - name: Build universal macOS app
+        run: npm run tauri build -- --target universal-apple-darwin
+
+      - name: Collect artifacts
+        id: collect
+        run: |
+          set -euo pipefail
+          app="$(find "${BUNDLE_DIR}/macos" -maxdepth 1 -name '*.app' | head -n 1)"
+          dmg="$(find "${BUNDLE_DIR}/dmg" -maxdepth 1 -name '*.dmg' | head -n 1)"
+          if [ -z "${app}" ] || [ -z "${dmg}" ]; then
+            echo "::error::Bundle output not found under ${BUNDLE_DIR}"
+            ls -R "${BUNDLE_DIR}" || true
+            exit 1
+          fi
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${app}/Contents/Info.plist")"
+          mkdir -p dist
+          cp "${dmg}" "dist/${APP_NAME}_${version}_universal.dmg"
+          # ditto keeps symlinks, resource forks and permissions, which a plain zip drops.
+          ditto -c -k --sequesterRsrc --keepParent "${app}" "dist/${APP_NAME}_${version}_universal.app.zip"
+          (cd dist && shasum -a 256 -- *.dmg *.zip > "${APP_NAME}_${version}_universal.sha256")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "--- dist ---"
+          ls -la dist
+          echo "--- signature ---"
+          codesign -dv --verbose=2 "${app}" 2>&1 || echo "unsigned"
+          echo "--- architectures ---"
+          lipo -archs "${app}/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${app}/Contents/Info.plist")"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ steps.collect.outputs.version }}-macos-universal
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to the GitHub Release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ env.APP_NAME }} ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
+          files: |
+            dist/*.dmg
+            dist/*.app.zip
+            dist/*.sha256
