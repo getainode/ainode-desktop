@@ -73,7 +73,8 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the main window hides it; the app lives in the menu bar.
+            // Closing the main window hides it; the app lives in the menu bar
+            // (the system tray on Windows). Same on every platform.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == windows::MAIN {
                     api.prevent_close();
@@ -85,16 +86,22 @@ pub fn run() {
         .expect("error while building AINode");
 
     app.run(|app, event| match event {
-        // Dock icon clicked with no window showing: bring the app back.
+        // Dock icon clicked with no window showing: bring the app back. This
+        // event only exists on macOS; Windows has no dock, and the tray icon
+        // (click, or double click) does that job there.
+        #[cfg(target_os = "macos")]
         RunEvent::Reopen {
             has_visible_windows: false,
             ..
         } => menu::open_main(app),
-        // Last window closed: stay alive in the menu bar. `app.exit(0)`
+        // Last window closed: stay alive in the menu bar or tray. `app.exit(0)`
         // (the Quit items) sets a code and is allowed through.
         RunEvent::ExitRequested {
             api, code: None, ..
         } => api.prevent_exit(),
-        _ => {}
+        _ => {
+            // Only the macOS arm reads `app`.
+            let _ = app;
+        }
     });
 }

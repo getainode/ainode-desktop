@@ -1,11 +1,13 @@
 //! Menu bar item: a title like `AINode · 5 nodes · 3 models` and a menu
-//! with one line per node.
+//! with one line per node. On Windows it is a system tray icon: the title
+//! becomes the tooltip (a Windows tray has no text next to the icon) and the
+//! menu is the same.
 
 use crate::menu::{self, ids};
 use crate::nodes::{self, NodeRow};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
 
 pub const TRAY_ID: &str = "ainode-tray";
@@ -13,17 +15,38 @@ pub const TRAY_ID: &str = "ainode-tray";
 /// Create the tray item once, at startup.
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app, &[], None, false)?;
-    let icon = Image::from_bytes(include_bytes!("../icons/tray@2x.png"))?;
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon)
-        .icon_as_template(true)
+        .icon(icon()?)
+        // A template icon is tinted by the macOS menu bar for light and dark;
+        // the flag means nothing elsewhere.
+        .icon_as_template(cfg!(target_os = "macos"))
         .title("AINode")
         .tooltip("AINode")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| menu::handle(app, event.id().as_ref()))
+        // Double-clicking a tray icon opens the app; that is the Windows
+        // convention, and only Windows sends this event.
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick { .. } = event {
+                menu::open_main(tray.app_handle());
+            }
+        })
         .build(app)?;
     Ok(())
+}
+
+/// macOS: the monochrome template drawn for the menu bar.
+#[cfg(target_os = "macos")]
+fn icon() -> tauri::Result<Image<'static>> {
+    Image::from_bytes(include_bytes!("../icons/tray@2x.png"))
+}
+
+/// Windows (and Linux): the colour app icon, the same `.ico` the executable
+/// and the installer carry.
+#[cfg(not(target_os = "macos"))]
+fn icon() -> tauri::Result<Image<'static>> {
+    Image::from_bytes(include_bytes!("../icons/icon.ico"))
 }
 
 /// Refresh title and menu after a poll.

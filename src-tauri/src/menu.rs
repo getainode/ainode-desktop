@@ -1,8 +1,13 @@
 //! Application menu bar and the shared handler for menu and tray clicks.
+//!
+//! macOS gets the usual application menu (AINode, Edit, View, Window). On
+//! Windows the same items sit in a File, View, Help bar on the main window;
+//! the macOS-only entries (Services, Hide, Show All, Full Screen, the Window
+//! menu) have no meaning there and are left out.
 
 use crate::state::AppState;
 use crate::windows;
-use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_opener::OpenerExt;
 
@@ -19,21 +24,48 @@ pub mod ids {
     pub const QUIT: &str = "quit";
 }
 
-/// The menu bar: AINode, Edit, View, Window.
+/// The items both menu bars are built from.
+struct Items<R: Runtime> {
+    about: MenuItem<R>,
+    settings: MenuItem<R>,
+    site: MenuItem<R>,
+    quit: MenuItem<R>,
+    open: MenuItem<R>,
+    reload: MenuItem<R>,
+    refresh: MenuItem<R>,
+}
+
+fn items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Items<R>> {
+    Ok(Items {
+        about: MenuItemBuilder::with_id(ids::ABOUT, "About AINode").build(app)?,
+        settings: MenuItemBuilder::with_id(ids::SETTINGS, "Settings...")
+            .accelerator("CmdOrCtrl+,")
+            .build(app)?,
+        site: MenuItemBuilder::with_id(ids::SITE, "Visit ainode.dev").build(app)?,
+        quit: MenuItemBuilder::with_id(ids::QUIT, "Quit AINode")
+            .accelerator("CmdOrCtrl+Q")
+            .build(app)?,
+        open: MenuItemBuilder::with_id(ids::OPEN, "Open AINode")
+            .accelerator("CmdOrCtrl+1")
+            .build(app)?,
+        reload: MenuItemBuilder::with_id(ids::RELOAD, "Reload")
+            .accelerator("CmdOrCtrl+R")
+            .build(app)?,
+        refresh: MenuItemBuilder::with_id(ids::REFRESH, "Refresh Node List")
+            .accelerator("CmdOrCtrl+Shift+R")
+            .build(app)?,
+    })
+}
+
+/// The macOS menu bar: AINode, Edit, View, Window.
+#[cfg(target_os = "macos")]
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let about = MenuItemBuilder::with_id(ids::ABOUT, "About AINode").build(app)?;
-    let settings = MenuItemBuilder::with_id(ids::SETTINGS, "Settings...")
-        .accelerator("CmdOrCtrl+,")
-        .build(app)?;
-    let site = MenuItemBuilder::with_id(ids::SITE, "Visit ainode.dev").build(app)?;
-    let quit = MenuItemBuilder::with_id(ids::QUIT, "Quit AINode")
-        .accelerator("CmdOrCtrl+Q")
-        .build(app)?;
+    let i = items(app)?;
     let app_menu = SubmenuBuilder::new(app, "AINode")
-        .item(&about)
+        .item(&i.about)
         .separator()
-        .item(&settings)
-        .item(&site)
+        .item(&i.settings)
+        .item(&i.site)
         .separator()
         .services()
         .separator()
@@ -41,7 +73,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .hide_others()
         .show_all()
         .separator()
-        .item(&quit)
+        .item(&i.quit)
         .build()?;
 
     let edit = SubmenuBuilder::new(app, "Edit")
@@ -54,19 +86,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .select_all()
         .build()?;
 
-    let open = MenuItemBuilder::with_id(ids::OPEN, "Open AINode")
-        .accelerator("CmdOrCtrl+1")
-        .build(app)?;
-    let reload = MenuItemBuilder::with_id(ids::RELOAD, "Reload")
-        .accelerator("CmdOrCtrl+R")
-        .build(app)?;
-    let refresh = MenuItemBuilder::with_id(ids::REFRESH, "Refresh Node List")
-        .accelerator("CmdOrCtrl+Shift+R")
-        .build(app)?;
     let view = SubmenuBuilder::new(app, "View")
-        .item(&open)
-        .item(&reload)
-        .item(&refresh)
+        .item(&i.open)
+        .item(&i.reload)
+        .item(&i.refresh)
         .separator()
         .fullscreen()
         .build()?;
@@ -79,6 +102,30 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build()?;
 
     Menu::with_items(app, &[&app_menu, &edit, &view, &window])
+}
+
+/// The Windows (and Linux) menu bar: File, View, Help, shown on the main
+/// window. Minimize, maximize and close live on the title bar there, and the
+/// webview handles its own Edit shortcuts, so neither menu is repeated.
+#[cfg(not(target_os = "macos"))]
+pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let i = items(app)?;
+    let file = SubmenuBuilder::new(app, "File")
+        .item(&i.settings)
+        .item(&i.site)
+        .separator()
+        .item(&i.quit)
+        .build()?;
+
+    let view = SubmenuBuilder::new(app, "View")
+        .item(&i.open)
+        .item(&i.reload)
+        .item(&i.refresh)
+        .build()?;
+
+    let help = SubmenuBuilder::new(app, "Help").item(&i.about).build()?;
+
+    Menu::with_items(app, &[&file, &view, &help])
 }
 
 /// One handler for both the menu bar and the tray menu.
