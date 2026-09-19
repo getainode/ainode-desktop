@@ -24,7 +24,7 @@ Settings are stored in the app data folder (`~/Library/Application Support/ai.ai
 - **Main window**: the AINode web UI at `http://<master>/`. If the master is unreachable, a bundled "Waiting for ..." page takes over and retries every 5 seconds. If the master restarts mid-session, the app notices within about 15 seconds, shows the waiting page, and goes back to the UI when the master answers again. Closing the window hides it; the app keeps running in the menu bar. Cmd+Q quits.
 - **Menu bar item**: polls `/api/nodes` every 10 seconds and shows a title like `AINode · 6 nodes · 5 models`. The menu lists every node as `name · model or load progress · online/offline`, followed by Settings, Refresh, About and Quit.
 - **Notifications**: when a node goes from loading to ready you get `Model is ready on Node (loaded in N min)`. When a node goes offline or comes back, you get one notification each way. Nothing fires on the first poll after launch.
-- **About**: `AINode Desktop 0.1.0 · Made in Texas` and a link to [ainode.dev](https://ainode.dev).
+- **About**: `AINode Desktop 0.1.1 · Made in Texas` and a link to [ainode.dev](https://ainode.dev).
 
 The app only ever reads from the master (`GET /api/status`, `GET /api/nodes`). Everything you do inside the web UI goes through the UI itself, exactly as it would in a browser.
 

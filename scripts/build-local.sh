@@ -7,8 +7,10 @@
 # only (works with a Homebrew rustc, no rustup needed).
 #
 # Signing is optional here exactly as in CI: export APPLE_SIGNING_IDENTITY
-# (and, for notarization, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID) before
-# running and Tauri signs; leave them unset and the app builds unsigned.
+# (and, for notarization, APPLE_API_KEY, APPLE_API_ISSUER and
+# APPLE_API_KEY_PATH, or the Apple ID trio APPLE_ID, APPLE_PASSWORD,
+# APPLE_TEAM_ID) before running and Tauri signs; leave them unset and the app
+# builds unsigned. See docs/RELEASING.md for where the material lives.
 #
 # Usage:
 #   scripts/build-local.sh            # universal
@@ -84,9 +86,11 @@ fi
 if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
   echo "==> Signing with: ${APPLE_SIGNING_IDENTITY}"
   if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-    echo "==> Notarization: on"
+    echo "==> Notarization: on (Apple ID)"
+  elif [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+    echo "==> Notarization: on (App Store Connect API key)"
   else
-    echo "==> Notarization: off (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID not all set)"
+    echo "==> Notarization: off (set APPLE_API_KEY, APPLE_API_ISSUER and APPLE_API_KEY_PATH, or APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID)"
   fi
 else
   echo "==> Signing: off (APPLE_SIGNING_IDENTITY not set), the app will be unsigned"
