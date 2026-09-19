@@ -12,12 +12,6 @@ on:
   push:
     tags:
       - "v*"
-    # TEMPORARY while the workflow is iterated on the windows branch: GitHub
-    # only accepts workflow_dispatch for a file that exists on the default
-    # branch, so pushes are the only way to run it before it is merged.
-    # Removed before merge.
-    branches:
-      - windows
   workflow_dispatch:
     inputs:
       tag:
