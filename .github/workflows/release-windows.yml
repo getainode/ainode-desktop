@@ -267,17 +267,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # The macOS workflow usually creates the release first; this step finds
-      # the existing release for the tag and adds (or replaces) the Windows
-      # files. Whichever workflow gets there first creates it, with the same
-      # name and generated notes, so the order does not matter.
+      # Both workflows land on the one release for the tag: the action finds
+      # an existing release (or reconciles two drafts created at the same
+      # moment onto the earlier one) and adds or replaces this workflow's
+      # files. The release notes belong to the macOS workflow, which asks for
+      # generated notes; asking here too would append them a second time
+      # whenever this run arrives after that one, because the action
+      # regenerates notes on an update as well as on a create. When this run
+      # creates the release the body starts empty and the macOS run fills it.
       - name: Attach to the GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ env.APP_NAME }} ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          generate_release_notes: false
           prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
           files: |
             dist/*.exe
