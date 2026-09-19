@@ -308,8 +308,9 @@ tag rule (subject `...:environment:<name>`), not a looser subject.
 
 The workflow decides in one step, and says why in the log, whether it will
 sign: only on `main`, and only when all three `AZURE_*` secrets are set (all
-or nothing; `azure/login` needs every one and a partial set used to cost a
-whole build before failing). If the login itself fails, most likely because
+or nothing: `azure/login` needs every one, and a partial set would fail
+inside the login after the whole build, with a message about none of them).
+If the login itself fails, most likely because
 the federated credential below does not exist yet, the run prints a warning
 and ships the installers unsigned instead of failing. The job summary says
 `signed` or `UNSIGNED` either way.
@@ -317,9 +318,9 @@ and ships the installers unsigned instead of failing. The job summary says
 ### Secrets
 
 Three repository secrets, all identifiers rather than passwords (they appear
-in OIDC tokens and portal URLs), all on the Bitwarden item **"Azure Trusted
-Signing"** (full name: `Azure Trusted Signing`, then `titanium-gh-signing
-(Windows code signing)`):
+in OIDC tokens and portal URLs), all fields on the Bitwarden item whose name
+starts with **"Azure Trusted Signing"** (the `titanium-gh-signing` Windows
+code signing item, shared by every Titanium desktop app):
 
 | Secret | Bitwarden field |
 | --- | --- |
@@ -390,7 +391,8 @@ gh run watch --repo getainode/ainode-desktop
 
 To check a downloaded file by hand: on Windows,
 `Get-AuthenticodeSignature .\AINode_0.1.1_x64-setup.exe` (Status `Valid`,
-signer `Titanium`); on a Mac, `brew install osslsigncode` then
+and the signer certificate is the Titanium one); on a Mac,
+`brew install osslsigncode` then
 `osslsigncode verify AINode_0.1.1_x64-setup.exe`.
 
 ### Unsigned builds and SmartScreen
