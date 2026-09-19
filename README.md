@@ -2,7 +2,7 @@
 
 AINode on your desktop: point it at your master node and go.
 
-AINode Desktop is a small native macOS app that wraps the [AINode](https://github.com/getainode/ainode) web UI. You tell it where your master AINode lives, and from then on the dashboard opens as its own app instead of a browser tab. It also puts your fleet in the menu bar and tells you when a model finishes loading.
+AINode Desktop is a small native app for macOS and Windows that wraps the [AINode](https://github.com/getainode/ainode) web UI. You tell it where your master AINode lives, and from then on the dashboard opens as its own app instead of a browser tab. It also puts your fleet in the menu bar and tells you when a model finishes loading.
 
 It is a thin shell, not a rewrite. The window shows the same web UI your master already serves. The app adds the parts a browser cannot: one saved address, a menu bar item, native notifications, and a page that waits for the master when it is down.
 
@@ -17,7 +17,7 @@ Two fields sit behind that question:
 
 Each field has a **Test** button that calls `/api/status` and shows the node name and AINode version that answered. On launch the app probes both addresses at once (2 second timeout), uses whichever answers, and remembers which one worked so the next launch tries it first. The first launch with nothing saved opens this screen.
 
-Settings are stored in the app data folder (`~/Library/Application Support/ai.ainode.desktop/settings.json` on macOS).
+Settings are stored in the app data folder (`~/Library/Application Support/ai.ainode.desktop/settings.json` on macOS, `%APPDATA%\ai.ainode.desktop\settings.json` on Windows).
 
 ## What you get
 
@@ -62,9 +62,13 @@ cargo clippy
 
 The build is unsigned. To open it on another Mac, right-click the app and choose Open the first time, or clear the quarantine flag with `xattr -dr com.apple.quarantine AINode.app`.
 
+### Windows
+
+The same source builds on Windows: Rust with the MSVC toolchain, Node 22 and the WebView2 runtime (part of Windows 10 and 11), then `npm ci` and `npm run tauri build` for an NSIS installer and an MSI under `src-tauri\target\release\bundle\`. On Windows the menu bar is File, View, Help; the fleet lives in the system tray (colour icon, double click opens the app); closing the window hides it to the tray. Releases carry signed installers built by `.github/workflows/release-windows.yml`; see [docs/RELEASING.md](docs/RELEASING.md#windows).
+
 ### Icons
 
-`src-tauri/icons/` holds the standard Tauri icon set. To replace it, drop a square PNG (1024 px or larger) somewhere and run `npm run tauri icon path/to/icon.png`; no config changes are needed. `tray.png` and `tray@2x.png` are the monochrome menu bar template icons.
+`src-tauri/icons/` holds the standard Tauri icon set. To replace it, drop a square PNG (1024 px or larger) somewhere and run `npm run tauri icon path/to/icon.png`; no config changes are needed. `tray.png` and `tray@2x.png` are the monochrome macOS menu bar template icons; the Windows tray uses `icon.ico`.
 
 ### Layout
 
