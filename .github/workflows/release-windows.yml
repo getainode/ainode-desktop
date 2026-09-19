@@ -1,0 +1,283 @@
+name: Release Windows
+
+# Builds the Windows x64 installers (an NSIS setup .exe and an MSI) on every
+# v* tag and attaches them to the GitHub Release for that tag, next to the
+# macOS files that release.yml puts there. Authenticode signing through Azure
+# Trusted Signing switches on by itself on a run from main when the three
+# AZURE_* secrets exist and the federated credential for this repository has
+# been added in Entra ID (see docs/RELEASING.md); otherwise the build still
+# succeeds and ships unsigned.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach to its release (blank: build the current branch, artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  id-token: write # GitHub OIDC token for the azure/login federated credential
+
+concurrency:
+  group: release-windows-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  APP_NAME: AINode
+  BUNDLE_DIR: src-tauri/target/release/bundle
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust stable (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Read the app version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same precedence Tauri uses: tauri.conf.json version (a string, or a
+          # path to a JSON file holding one), else the Cargo.toml package version.
+          app_version="$(node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+            let v = conf.version;
+            if (typeof v === "string" && v.endsWith(".json")) {
+              v = JSON.parse(fs.readFileSync(path.join("src-tauri", v), "utf8")).version;
+            }
+            if (!v) {
+              const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+              const pkg = cargo.split(/^\[package\]\s*$/m)[1] || "";
+              const m = pkg.split(/^\[/m)[0].match(/^\s*version\s*=\s*"([^"]+)"/m);
+              v = m ? m[1] : "";
+            }
+            process.stdout.write(String(v || ""));
+          ')"
+          echo "app version: ${app_version}"
+          echo "version=${app_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag matches the app version
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag_version="${RELEASE_TAG#v}"
+          echo "tag: ${RELEASE_TAG} (${tag_version})  app: ${APP_VERSION}"
+          if [ "${tag_version}" != "${APP_VERSION}" ]; then
+            echo "::error::Tag ${RELEASE_TAG} does not match the app version ${APP_VERSION}. Bump src-tauri/tauri.conf.json first, then tag."
+            exit 1
+          fi
+
+      # The Rust cache keeps target/release/bundle between runs, so an older
+      # installer could ride along into the artifact glob and the signing step.
+      # Build into a clean bundle directory every time.
+      - name: Clean stale bundle outputs
+        shell: pwsh
+        run: Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "${{ env.BUNDLE_DIR }}"
+
+      # Targets come from src-tauri/tauri.windows.conf.json (nsis and msi),
+      # which Tauri merges over tauri.conf.json on Windows.
+      - name: Build Windows installers (unsigned)
+        run: npm run tauri build
+
+      - name: Collect installers
+        id: collect
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem "${{ env.BUNDLE_DIR }}/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem "${{ env.BUNDLE_DIR }}/msi/*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host "::error::No NSIS installer under ${{ env.BUNDLE_DIR }}/nsis"
+            Get-ChildItem -Recurse "${{ env.BUNDLE_DIR }}" -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+          if (-not $msi) {
+            Write-Host "::warning::No MSI under ${{ env.BUNDLE_DIR }}/msi; shipping the NSIS installer only."
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $exe.FullName "dist/${{ env.APP_NAME }}_${env:APP_VERSION}_x64-setup.exe"
+          if ($msi) { Copy-Item $msi.FullName "dist/${{ env.APP_NAME }}_${env:APP_VERSION}_x64.msi" }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      # --- Azure Trusted Signing ---------------------------------------------
+      # Identity: the Entra app titanium-gh-signing, through a GitHub OIDC
+      # federated credential whose subject is this repository on
+      # refs/heads/main. No client secret exists anywhere: the three secrets
+      # are identifiers. A run on any other ref (a v* tag push included)
+      # builds unsigned by design, so the signed installers come from a
+      # workflow_dispatch on main with the tag as input, which rebuilds the
+      # tag and replaces the files on its release. Do not widen the credential
+      # to other refs; sign-only-from-main is the intended boundary.
+      #
+      # The gate needs all three secrets or none: azure/login wants every one
+      # of them, and a login that fails after the whole build says nothing
+      # about which is missing. Better to build unsigned and say so.
+      - name: Decide whether this run can sign
+        id: gate
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          on_main='${{ github.ref == 'refs/heads/main' }}'
+          missing=
+          [ -n "$AZURE_CLIENT_ID" ] || missing="$missing AZURE_CLIENT_ID"
+          [ -n "$AZURE_TENANT_ID" ] || missing="$missing AZURE_TENANT_ID"
+          [ -n "$AZURE_SUBSCRIPTION_ID" ] || missing="$missing AZURE_SUBSCRIPTION_ID"
+          sign=false
+          if [ "$on_main" = "true" ] && [ -z "$missing" ]; then sign=true; fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "sign=$sign on_main=$on_main missing=${missing:-none}"
+          if [ "$sign" != "true" ] && [ -n "$missing" ]; then
+            echo "::notice::Building UNSIGNED because these secrets are not set:$missing. The installers will build and upload without an Authenticode signature."
+          elif [ "$sign" != "true" ]; then
+            echo "::notice::Building UNSIGNED because this run is not on main (ref: ${{ github.ref }}). Start release-windows.yml from main with the tag as input to sign and replace the release files."
+          fi
+
+      # continue-on-error so a federated credential that does not exist yet
+      # (the state of a fresh repository) degrades to "unsigned, loudly"
+      # instead of failing the release. The verify step below still refuses
+      # to pass off an unsigned installer as signed.
+      - name: Azure login (OIDC)
+        id: azlogin
+        if: steps.gate.outputs.sign == 'true'
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Report that signing is being skipped
+        if: steps.gate.outputs.sign == 'true' && steps.azlogin.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::warning title=Windows signing SKIPPED, azure/login could not authenticate::The installers for this run are UNSIGNED. Most likely the federated credential for this repository does not exist yet in Entra ID (titanium-gh-signing). docs/RELEASING.md has the exact subject to add. Also check that AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID are set."
+
+      - name: Sign the installers (Azure Trusted Signing)
+        if: steps.azlogin.outcome == 'success'
+        uses: azure/trusted-signing-action@v0
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: Titanium
+          certificate-profile-name: titanium-public
+          files-folder: ${{ github.workspace }}/dist
+          files-folder-filter: exe,msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Hard gate: when we signed, Windows itself must consider every
+      # signature Valid (chain and timestamp) or the run fails. A file that
+      # claims to be signed and is not is worse than an honestly unsigned one.
+      - name: Verify the signatures
+        if: steps.azlogin.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem dist/*.exe, dist/*.msi
+          if (-not $files) { throw "nothing to verify under dist" }
+          $bad = 0
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host "== $($f.Name)"
+            $sig | Format-List Status, StatusMessage
+            $sig.SignerCertificate | Format-List Subject, NotBefore, NotAfter
+            if ($sig.Status -ne 'Valid') { $bad++ }
+          }
+          if ($bad -gt 0) {
+            Write-Host "::error title=Windows signature is not Valid::$bad file(s) failed verification. Refusing to publish."
+            exit 1
+          }
+          Write-Host "All signatures verified Valid."
+
+      # Checksums are taken last: Authenticode rewrites the files it signs.
+      - name: Write checksums and the summary
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          SIGNED: ${{ steps.azlogin.outcome == 'success' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem dist/*.exe, dist/*.msi
+          $lines = $files | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          $sums = "dist/${{ env.APP_NAME }}_${env:APP_VERSION}_x64.sha256"
+          $lines | Set-Content -Encoding ascii $sums
+          Get-Content $sums
+          $state = if ($env:SIGNED -eq 'true') { 'signed (Azure Trusted Signing)' } else { 'UNSIGNED' }
+          "## Windows x64: $state" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # Both workflows land on the one release for the tag: the action finds
+      # an existing release (or reconciles two drafts created at the same
+      # moment onto the earlier one) and adds or replaces this workflow's
+      # files. The release notes belong to the macOS workflow, which asks for
+      # generated notes; asking here too would append them a second time
+      # whenever this run arrives after that one, because the action
+      # regenerates notes on an update as well as on a create. When this run
+      # creates the release the body starts empty and the macOS run fills it.
+      - name: Attach to the GitHub Release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ env.APP_NAME }} ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: false
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
+          files: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.sha256

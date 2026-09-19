@@ -1,12 +1,13 @@
-# Releasing AINode for macOS
+# Releasing AINode
 
-The release pipeline lives in `.github/workflows/release.yml`. It builds a
-universal (Apple silicon + Intel) `.app` on a GitHub-hosted Mac, wraps it in a
-`.dmg` and a zip, and attaches both to the GitHub Release for the tag. When the
-Apple secrets exist (they do, since 0.1.1) the app and the disk image are
+The macOS release pipeline lives in `.github/workflows/release.yml`. It builds
+a universal (Apple silicon + Intel) `.app` on a GitHub-hosted Mac, wraps it in
+a `.dmg` and a zip, and attaches both to the GitHub Release for the tag. When
+the Apple secrets exist (they do, since 0.1.1) the app and the disk image are
 signed with the Developer ID certificate, notarized through the App Store
 Connect API key, and stapled; when they do not the build still ships,
-unsigned.
+unsigned. The Windows installers come from a second workflow on the same tag;
+see [Windows](#windows) below.
 
 ## Cut a release
 
@@ -244,6 +245,176 @@ certificate in your login keychain, or `APPLE_CERTIFICATE` and
 `APPLE_API_ISSUER` and `APPLE_API_KEY_PATH` to notarize), or leave them unset
 for an unsigned build. The local script does not notarize the `.dmg`; CI
 does.
+
+## Windows
+
+The Windows pipeline is `.github/workflows/release-windows.yml`. It runs on
+the same triggers as the macOS one (every `v*` tag, and `workflow_dispatch`
+with the optional `tag` input), builds the x64 installers on a GitHub-hosted
+Windows runner, and attaches them to the same GitHub Release:
+
+- `AINode_<version>_x64-setup.exe`: the NSIS installer. Per-user install, no
+  administrator prompt, Start menu and desktop shortcuts, uninstaller.
+- `AINode_<version>_x64.msi`: the same app as a Windows Installer package,
+  for anyone deploying with Intune or Group Policy.
+- `AINode_<version>_x64.sha256`: checksums of both, taken after signing.
+
+The workflow artifact is `AINode-<version>-windows-x64`. Both workflows
+update the same release; whichever finishes first creates it, and each only
+adds or replaces its own files.
+
+```bash
+gh run list --repo getainode/ainode-desktop --workflow release-windows.yml
+gh release download v0.1.1 --repo getainode/ainode-desktop --pattern '*.exe'
+```
+
+What the app does differently on Windows (everything else is the same code):
+the menu bar is File, View, Help on the main window; the fleet lives in the
+system tray with the colour app icon (Windows 11 tucks new tray icons into the
+overflow flyout behind the `^` until you drag one out; a double click on it
+opens the app); notifications come through Windows notifications; the
+setting is stored at `%APPDATA%\ai.ainode.desktop\settings.json`. Closing
+the window hides it to the tray, exactly as on macOS.
+
+### Signing: Azure Trusted Signing
+
+Windows installers are Authenticode signed through Azure Trusted Signing,
+the same way every other Titanium desktop app is signed. There is no
+certificate file and no client secret anywhere: the workflow asks GitHub for
+an OIDC token, `azure/login` exchanges it for an Azure session through a
+federated credential on the Entra app `titanium-gh-signing`, and
+`azure/trusted-signing-action` signs `dist/*.exe` and `dist/*.msi` with the
+`titanium-public` certificate profile on the `Titanium` signing account
+(endpoint `https://eus.codesigning.azure.net/`). Windows then has to report
+every signature `Valid` (`Get-AuthenticodeSignature`) or the run fails; a
+file that claims to be signed and is not never reaches the release.
+
+**The boundary.** The federated credential matches this repository on
+`refs/heads/main` and nothing else. A run started from any other ref builds
+an unsigned installer by design, and that includes the run a `v*` tag push
+starts (its OIDC subject names the tag, not `main`). So a release gets its
+signed Windows files in a second step, after the tag's own runs finish:
+
+```bash
+gh workflow run release-windows.yml --repo getainode/ainode-desktop --ref main -f tag=v0.1.1
+```
+
+That run has `main` as its ref, checks out the tag, builds it, signs, verifies
+and replaces the Windows files on the tag's release (the `.sha256` changes
+with them). Do not widen the credential to branches or tags: signing only
+from `main` is the intended boundary, not a limitation to work around. If
+tag-time signing ever matters, the right tool is a GitHub environment with a
+tag rule (subject `...:environment:<name>`), not a looser subject.
+
+The workflow decides in one step, and says why in the log, whether it will
+sign: only on `main`, and only when all three `AZURE_*` secrets are set (all
+or nothing: `azure/login` needs every one, and a partial set would fail
+inside the login after the whole build, with a message about none of them).
+If the login itself fails, most likely because
+the federated credential below does not exist yet, the run prints a warning
+and ships the installers unsigned instead of failing. The job summary says
+`signed` or `UNSIGNED` either way.
+
+### Secrets
+
+Three repository secrets, all identifiers rather than passwords (they appear
+in OIDC tokens and portal URLs), all fields on the Bitwarden item whose name
+starts with **"Azure Trusted Signing"** (the `titanium-gh-signing` Windows
+code signing item, shared by every Titanium desktop app):
+
+| Secret | Bitwarden field |
+| --- | --- |
+| `AZURE_CLIENT_ID` | `AZURE_CLIENT_ID` (the Entra app's application id) |
+| `AZURE_TENANT_ID` | `AZURE_TENANT_ID` |
+| `AZURE_SUBSCRIPTION_ID` | `AZURE_SUBSCRIPTION_ID` |
+
+The non-secret parts (`ENDPOINT`, `SIGNING_ACCOUNT`, `CERT_PROFILE`) are on
+the same item and appear in plain text in the workflow. To set or rotate the
+secrets, the same way as the Apple ones, values never echoed:
+
+```bash
+export REPO=getainode/ainode-desktop
+export BW_SESSION="$(cat ~/.bw-session)"
+AZ="$(bw get item "Azure Trusted Signing" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+field() { bw get item "$1" | python3 -c 'import json,sys; it=json.load(sys.stdin); print(next(f.get("value") or "" for f in it["fields"] if f["name"]==sys.argv[1]), end="")' "$2"; }
+for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+  field "$AZ" "$name" | gh secret set "$name" --repo "$REPO"
+done
+gh secret list --repo "$REPO"
+```
+
+### The federated credential (one-time, Azure portal)
+
+The Entra app already holds the signing role on the account, so the only
+thing a new repository needs is a federated credential that names it. Only
+an owner of the Azure tenant can add one, and the CLI route is closed on the
+Mac Studio (device code login is blocked tenant-wide), so this is a portal
+job. Add it next to the existing credentials; never edit or replace those.
+
+This repository presents GitHub's **immutable** subject, with numeric ids, so
+use the "Other issuer" scenario and type the subject in rather than letting
+the GitHub Actions wizard compute one (the wizard writes the plain
+`repo:getainode/ainode-desktop:...` form, which will never match). The exact
+subject, read from the API, is:
+
+```
+repo:getainode@275500205/ainode-desktop@1376692291:ref:refs/heads/main
+```
+
+Steps: **Microsoft Entra ID > App registrations > titanium-gh-signing >
+Certificates & secrets > Federated credentials > Add credential**, then:
+
+| Field | Value |
+| --- | --- |
+| Federated credential scenario | Other issuer |
+| Issuer | `https://token.actions.githubusercontent.com` |
+| Subject identifier | `repo:getainode@275500205/ainode-desktop@1376692291:ref:refs/heads/main` |
+| Audience | `api://AzureADTokenExchange` |
+| Name | `ainode-desktop-main` (any name, it is just a label) |
+
+To re-derive the subject later (it only changes if the repository is
+transferred or the OIDC customization is changed):
+
+```bash
+gh api /repos/getainode/ainode-desktop/actions/oidc/customization/sub -q .sub_claim_prefix
+# append :ref:refs/heads/main
+```
+
+Then prove it from `main`: start the workflow with an existing tag, and look
+for `All signatures verified Valid.` in the "Verify the signatures" step and
+`signed (Azure Trusted Signing)` in the job summary.
+
+```bash
+gh workflow run release-windows.yml --repo getainode/ainode-desktop --ref main -f tag=v0.1.1
+gh run watch --repo getainode/ainode-desktop
+```
+
+To check a downloaded file by hand: on Windows,
+`Get-AuthenticodeSignature .\AINode_0.1.1_x64-setup.exe` (Status `Valid`,
+and the signer certificate is the Titanium one); on a Mac,
+`brew install osslsigncode` then
+`osslsigncode verify AINode_0.1.1_x64-setup.exe`.
+
+### Unsigned builds and SmartScreen
+
+An unsigned installer (any run before the federated credential exists, or a
+build from a branch) runs fine but Windows SmartScreen stops the first launch
+with "Windows protected your PC" and no Run button. Click **More info**, then
+**Run anyway**. A signed installer skips that dialog once the certificate has
+built reputation with SmartScreen, which happens on its own after some
+downloads.
+
+### Build and check locally
+
+On a Windows machine with Rust (MSVC toolchain), Node 22 and the WebView2
+runtime (present on Windows 10 and 11):
+
+```powershell
+npm ci
+npm run tauri build      # src-tauri\target\release\bundle\nsis\*.exe and msi\*.msi
+```
+
+Signing is not part of the local build; only the workflow on `main` signs.
 
 ## App icon
 

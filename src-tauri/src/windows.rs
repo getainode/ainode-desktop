@@ -92,6 +92,7 @@ pub fn show_settings(app: &AppHandle) {
         .center()
         .build();
     if let Ok(w) = built {
+        without_menu_bar(&w);
         let _ = w.set_focus();
     }
 }
@@ -111,8 +112,19 @@ pub fn show_about(app: &AppHandle) {
         .center()
         .build();
     if let Ok(w) = built {
+        without_menu_bar(&w);
         let _ = w.set_focus();
     }
+}
+
+/// Windows and Linux hand every new window the app-wide menu bar; the small
+/// dialogs (Settings, About) do not want one. macOS has a single menu bar for
+/// the whole app, so there is nothing to take away there.
+fn without_menu_bar(window: &WebviewWindow) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = window.remove_menu();
+    #[cfg(target_os = "macos")]
+    let _ = window;
 }
 
 /// Debug builds print navigation events to stderr.
