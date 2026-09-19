@@ -1,0 +1,308 @@
+/* AINode Desktop: shared look for the app's own screens. Matches the AINode web UI. */
+
+:root {
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --surface-2: #161616;
+  --border: #1f1f1f;
+  --border-hover: #2a2a2a;
+  --green: #76B900;
+  --green-bright: #8ACE00;
+  --green-glow: rgba(118, 185, 0, 0.25);
+  --red: #FF3333;
+  --amber: #FFB800;
+  --text: #E0E0E0;
+  --text-2: #888888;
+  --text-3: #555555;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+a {
+  color: var(--green-bright);
+}
+
+.page {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 32px 20px;
+}
+
+.page.centered {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.brand img {
+  width: 40px;
+  height: 40px;
+}
+
+.brand h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+
+.lead {
+  color: var(--text-2);
+  margin: 0 0 22px;
+}
+
+.field {
+  margin-bottom: 18px;
+}
+
+.field label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.field .hint {
+  color: var(--text-3);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  padding: 9px 12px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+input[type="text"]::placeholder {
+  color: var(--text-3);
+}
+
+input[type="text"]:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px var(--green-glow);
+}
+
+button {
+  appearance: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: default;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 9px 14px;
+  white-space: nowrap;
+}
+
+button:hover {
+  border-color: #3a3a3a;
+  background: #1c1c1c;
+}
+
+button:active {
+  background: #101010;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+button.primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #061000;
+}
+
+button.primary:hover {
+  background: var(--green-bright);
+  border-color: var(--green-bright);
+}
+
+button.link {
+  background: none;
+  border: none;
+  color: var(--green-bright);
+  font-weight: 500;
+  padding: 4px 6px;
+}
+
+.result {
+  font-size: 12px;
+  margin-top: 6px;
+  min-height: 18px;
+  font-family: var(--font-mono);
+}
+
+.result.ok {
+  color: var(--green-bright);
+}
+
+.result.bad {
+  color: var(--red);
+}
+
+.result.busy {
+  color: var(--text-2);
+}
+
+.error {
+  color: var(--red);
+  font-size: 13px;
+  min-height: 20px;
+  margin: 4px 0 10px;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.footer {
+  color: var(--text-3);
+  font-size: 12px;
+  margin-top: 18px;
+  text-align: center;
+}
+
+/* Waiting page */
+
+.spinner {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 26px;
+}
+
+.spinner img {
+  position: absolute;
+  inset: 20px;
+  width: 56px;
+  height: 56px;
+  opacity: 0.9;
+}
+
+.spinner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid var(--border-hover);
+  border-top-color: var(--green);
+  animation: spin 1.1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.waiting h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.waiting .addr {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.waiting .sub {
+  color: var(--text-2);
+  margin: 0;
+}
+
+.waiting .reason {
+  color: var(--text-3);
+  font-size: 12px;
+  margin: 12px 0 0;
+  min-height: 18px;
+}
+
+.waiting .actions {
+  justify-content: center;
+  margin-top: 26px;
+}
+
+/* About page */
+
+.about img.logo {
+  width: 88px;
+  height: 88px;
+  margin-bottom: 14px;
+}
+
+.about h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 2px;
+}
+
+.about .version {
+  color: var(--text-2);
+  margin: 0 0 16px;
+}
+
+.about p {
+  margin: 0 0 8px;
+  color: var(--text-2);
+}
+
+.about .made {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.about .actions {
+  justify-content: center;
+  margin-top: 18px;
+}

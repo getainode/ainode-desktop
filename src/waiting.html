@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AINode</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page centered waiting">
+    <div class="spinner"><img src="logo.png" alt=""></div>
+    <h1 id="title">Waiting for <span class="addr" id="primary">your master AINode</span></h1>
+    <p class="sub" id="also"></p>
+    <p class="sub">Retrying every 5 seconds. The app opens the AINode UI as soon as it answers.</p>
+    <p class="reason" id="reason"></p>
+    <div class="actions">
+      <button type="button" id="retry">Retry now</button>
+      <button type="button" id="settings">Settings...</button>
+    </div>
+  </div>
+  <script src="waiting.js"></script>
+</body>
+</html>
