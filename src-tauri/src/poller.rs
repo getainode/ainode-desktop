@@ -4,7 +4,7 @@
 use crate::config::{self, Which};
 use crate::nodes::Event;
 use crate::probe::{self, Probe};
-use crate::state::AppState;
+use crate::state::{AppState, Serving};
 use crate::{api, tray, windows};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
@@ -44,11 +44,14 @@ async fn run(app: AppHandle) {
         }
 
         let current = state.master();
-        let preferred = current
-            .as_deref()
-            .and_then(|a| settings.which_of(a))
-            .or(settings.last_good);
-        let found = probe::find_master(&state.client, &settings, preferred).await;
+        let found = probe::find_master(&state.client, &settings, current.as_deref()).await;
+
+        // Whoever answered knows where the rest of the fleet is. Learn it on
+        // every successful poll, so the list is already on disk the next time
+        // this address is the one that went away.
+        if let Some(probe) = found.as_ref().filter(|p| p.ok()) {
+            learn_fleet(&app, probe).await;
+        }
 
         match (current.as_deref(), &found) {
             (None, Some(p)) => {
@@ -56,8 +59,10 @@ async fn run(app: AppHandle) {
                 came_up(&app, p);
             }
             (Some(c), Some(p)) if c != p.address => {
-                // The address we were on stopped answering but the other one
-                // did: follow it.
+                // The address we were on stopped answering but another one did:
+                // follow it, whether it is the alternate or a node out of the
+                // fleet list. Also the way home: the primary wins the pick as
+                // soon as it answers again.
                 fail_streak = 0;
                 came_up(&app, p);
             }
@@ -84,7 +89,7 @@ async fn run(app: AppHandle) {
                         Ok(mut fleet) => fleet.observe(&rows, unix_now()),
                         Err(_) => Vec::new(),
                     };
-                    tray::update(&app, &rows, Some(&address), true);
+                    tray::update(&app, &rows, state.serving().as_ref(), true);
                     state.set_rows(rows);
                     for event in &events {
                         notify(&app, event);
@@ -112,9 +117,58 @@ async fn run(app: AppHandle) {
 
 /// Plain words for the waiting page when nothing answers.
 fn describe_failure(settings: &config::Settings) -> String {
-    match settings.alternate.as_deref() {
+    let mut line = match settings.alternate.as_deref() {
         Some(alt) => format!("No answer from {} or {}", settings.primary, alt),
         None => format!("No answer from {}", settings.primary),
+    };
+    let fleet = settings.fleet_candidates().len();
+    if fleet > 0 {
+        // Say that the fleet was tried too, or a whole cluster of live nodes
+        // looks like it was never asked.
+        line.push_str(&format!(
+            ", or {} other node{} of the fleet",
+            fleet,
+            if fleet == 1 { "" } else { "s" }
+        ));
+    }
+    line
+}
+
+/// Save the fleet's addresses, as reported by the node that just answered.
+///
+/// `endpoint_hint` on `/api/status` is the free path and the usual one. A node
+/// that answered status without one is asked `/api/cluster/endpoint` once, and
+/// never again this session if it 404s: that is a node older than the fleet
+/// list, and there is nothing to learn from it.
+async fn learn_fleet(app: &AppHandle, probe: &Probe) {
+    let state = app.state::<AppState>();
+    let Ok(status) = probe.result.as_ref() else {
+        return;
+    };
+    let mut rows = api::known_nodes(&status.endpoint_hint);
+    if rows.is_empty() {
+        if !state.may_ask_endpoint(&probe.address) {
+            return;
+        }
+        match api::fetch_endpoint(&state.client, &probe.address).await {
+            Ok(nodes) => rows = api::known_nodes(&nodes),
+            Err(err) => {
+                windows::debug_log(&format!("no fleet list from {}: {err}", probe.address));
+                state.endpoint_is_absent(&probe.address);
+                return;
+            }
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let updated = match state.settings.lock() {
+        Ok(mut s) => s.set_known(rows).then(|| s.clone()),
+        Err(_) => None,
+    };
+    if let Some(s) = updated {
+        windows::debug_log(&format!("fleet list: {} node(s) saved", s.known.len()));
+        let _ = config::save(app, &s);
     }
 }
 
@@ -126,16 +180,26 @@ fn came_up(app: &AppHandle, probe: &Probe) {
         // the notification memory fresh rather than mourning the old one.
         state.reset_fleet();
     }
-    state.set_master(Some(probe.address.clone()));
+    let serving = Serving {
+        address: probe.address.clone(),
+        name: probe.node_name(),
+        is_primary: probe.slot == Some(Which::Primary),
+    };
+    if let Some(line) = serving.via_label() {
+        windows::debug_log(&line);
+    }
+    state.set_serving(Some(serving));
     state.set_last_error(None);
-    remember_last_good(app, probe.which);
+    if let Some(which) = probe.slot {
+        remember_last_good(app, which);
+    }
     windows::show_master(app, &probe.address);
-    tray::update(app, &state.rows(), Some(&probe.address), true);
+    tray::update(app, &state.rows(), state.serving().as_ref(), true);
 }
 
 fn went_down(app: &AppHandle, settings: &config::Settings) {
     let state = app.state::<AppState>();
-    state.set_master(None);
+    state.set_serving(None);
     state.set_last_error(Some(describe_failure(settings)));
     windows::show_waiting(app);
     tray::update(app, &[], None, true);

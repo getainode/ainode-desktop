@@ -14,6 +14,11 @@
     </div>
     <p class="lead">Point this app at your master AINode. That is the only setting.</p>
 
+    <!-- Filled in from get_status_view: which node is serving right now, and
+         how many of the fleet's other addresses are saved as fallbacks. Not a
+         setting, and nothing to fill in: the nodes report this themselves. -->
+    <div class="result" id="serving"></div>
+
     <div class="field">
       <label for="primary">Primary address</label>
       <div class="row">
@@ -31,7 +36,7 @@
         <button type="button" id="test-alternate">Test</button>
       </div>
       <div class="result" id="result-alternate"></div>
-      <div class="hint">A second way to reach the same node, like its tailnet address. The app uses whichever one answers.</div>
+      <div class="hint">A second way to reach the same node, like its tailnet address. The app uses whichever one answers, and falls back to any other node of the fleet if neither does.</div>
     </div>
 
     <div class="error" id="error"></div>

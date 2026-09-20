@@ -71,9 +71,44 @@
     });
   }
 
+  // Which node is answering, and how many fallbacks are saved. Read-only: the
+  // fleet list comes from the nodes themselves, so there is nothing to edit.
+  const serving = document.getElementById("serving");
+
+  function fleetLine(count) {
+    if (!count) return "";
+    return count === 1
+      ? " · 1 other node of the fleet saved as a fallback"
+      : " · " + count + " other nodes of the fleet saved as fallbacks";
+  }
+
+  async function refreshServing() {
+    try {
+      const s = await invoke("get_status_view");
+      if (!s.configured) {
+        serving.className = "result";
+        serving.textContent = "";
+        return;
+      }
+      if (!s.master) {
+        serving.className = "result bad";
+        serving.textContent = (s.last_error || "Not connected") + fleetLine(s.fleet_count);
+        return;
+      }
+      const who = s.serving_via || "Connected to " + (s.serving_name || s.master);
+      serving.className = "result ok";
+      serving.textContent = who + " (" + s.master + ")" + fleetLine(s.fleet_count);
+    } catch (e) {
+      serving.className = "result";
+      serving.textContent = "";
+    }
+  }
+
   invoke("get_settings").then((s) => {
     primary.value = s.primary || "";
     alternate.value = s.alternate || "";
     primary.focus();
   });
+  refreshServing();
+  setInterval(refreshServing, 2000);
 })();

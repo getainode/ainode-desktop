@@ -5,6 +5,7 @@
 
 use crate::menu::{self, ids};
 use crate::nodes::{self, NodeRow};
+use crate::state::Serving;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
@@ -51,21 +52,27 @@ fn icon() -> tauri::Result<Image<'static>> {
 
 /// Refresh title and menu after a poll.
 ///
-/// `master` is the address in use (None while unreachable); `rows` is the
-/// last good snapshot; `configured` says whether any address is saved.
-pub fn update(app: &AppHandle, rows: &[NodeRow], master: Option<&str>, configured: bool) {
+/// `serving` is the node answering right now (None while unreachable); `rows` is
+/// the last good snapshot; `configured` says whether any address is saved.
+pub fn update(app: &AppHandle, rows: &[NodeRow], serving: Option<&Serving>, configured: bool) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
-    let title = match (configured, master) {
+    let title = match (configured, serving) {
         (false, _) => "AINode".to_string(),
         (true, None) => "AINode · offline".to_string(),
         (true, Some(_)) if rows.is_empty() => "AINode".to_string(),
-        (true, Some(_)) => nodes::tray_title(rows),
+        (true, Some(s)) => match s.name.as_deref().filter(|_| !s.is_primary) {
+            // Working through a fallback is worth one word in the menu bar: the
+            // fleet is up, the address the user typed is not, and nothing else
+            // on screen would say so.
+            Some(name) => format!("AINode · via {name}"),
+            None => nodes::tray_title(rows),
+        },
     };
     let _ = tray.set_title(Some(&title));
     let _ = tray.set_tooltip(Some(&title));
-    if let Ok(menu) = build_menu(app, rows, master, configured) {
+    if let Ok(menu) = build_menu(app, rows, serving, configured) {
         let _ = tray.set_menu(Some(menu));
     }
 }
@@ -73,18 +80,27 @@ pub fn update(app: &AppHandle, rows: &[NodeRow], master: Option<&str>, configure
 fn build_menu<R: Runtime>(
     app: &AppHandle<R>,
     rows: &[NodeRow],
-    master: Option<&str>,
+    serving: Option<&Serving>,
     configured: bool,
 ) -> tauri::Result<Menu<R>> {
     let open = MenuItemBuilder::with_id(ids::OPEN, "Open AINode").build(app)?;
     let mut b = MenuBuilder::new(app).item(&open).separator();
+
+    // The full sentence, above the node list: which node is serving this app,
+    // and at what address, whenever that is not the one the user configured.
+    if let Some(line) = serving.and_then(Serving::via_label) {
+        let via = MenuItemBuilder::with_id("serving", line)
+            .enabled(false)
+            .build(app)?;
+        b = b.item(&via).separator();
+    }
 
     if !configured {
         let hint = MenuItemBuilder::with_id("hint", "Not set up yet: choose Settings...")
             .enabled(false)
             .build(app)?;
         b = b.item(&hint);
-    } else if master.is_none() {
+    } else if serving.is_none() {
         let settings = app.state::<crate::state::AppState>().settings();
         let hint = MenuItemBuilder::with_id("hint", format!("Waiting for {}", settings.primary))
             .enabled(false)
@@ -95,6 +111,19 @@ fn build_menu<R: Runtime>(
                 .enabled(false)
                 .build(app)?;
             b = b.item(&hint2);
+        }
+        let fleet = settings.fleet_candidates().len();
+        if fleet > 0 {
+            let hint3 = MenuItemBuilder::with_id(
+                "hint-fleet",
+                format!(
+                    "and {fleet} other node{} of the fleet",
+                    if fleet == 1 { "" } else { "s" }
+                ),
+            )
+            .enabled(false)
+            .build(app)?;
+            b = b.item(&hint3);
         }
     } else if rows.is_empty() {
         let hint = MenuItemBuilder::with_id("hint", "No nodes reported yet")

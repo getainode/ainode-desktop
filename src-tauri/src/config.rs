@@ -4,6 +4,12 @@
 //! (for example the tailnet address of the same node). Both are stored as
 //! plain `host:port` strings. We also remember which one answered last so
 //! the next launch tries the likely winner first.
+//!
+//! A third field is not a setting and nobody types it: `known` is the fleet's
+//! own list of addresses, learned from whichever node answered last and kept on
+//! disk. Every AINode routes every model the fleet serves, so any node in that
+//! list can serve this app; without it, one address in one text box is a single
+//! point of failure for a cluster that does not have one.
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
@@ -15,6 +21,12 @@ pub const STORE_FILE: &str = "settings.json";
 const KEY_PRIMARY: &str = "primary";
 const KEY_ALTERNATE: &str = "alternate";
 const KEY_LAST_GOOD: &str = "last_good";
+const KEY_KNOWN: &str = "known";
+
+/// How many learned nodes to keep. A fleet this app would talk to is a handful
+/// of machines; the cap keeps an outage from fanning out into a long probe and
+/// keeps a stale list from growing without end.
+pub const MAX_KNOWN: usize = 12;
 
 /// Which of the two stored addresses is meant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +34,27 @@ const KEY_LAST_GOOD: &str = "last_good";
 pub enum Which {
     Primary,
     Alternate,
+}
+
+/// One node this app learned from the fleet, kept so it can be tried when the
+/// configured address stops answering. Not a setting: the node list comes from
+/// whichever AINode answered last, and the app only remembers it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownNode {
+    /// The node's own name, for saying "connected through Spark-2".
+    pub name: String,
+    /// `host:port`, already normalized.
+    pub address: String,
+}
+
+/// An address the app is willing to try, with whatever is known about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    /// The stored slot this came from, or None for a node learned from the fleet.
+    pub slot: Option<Which>,
+    pub address: String,
+    /// The node's name when the fleet list carried one.
+    pub name: Option<String>,
 }
 
 /// Everything the app remembers between launches.
@@ -33,6 +66,8 @@ pub struct Settings {
     pub alternate: Option<String>,
     /// The address that answered most recently.
     pub last_good: Option<Which>,
+    /// The fleet's other nodes, as last reported by a node that answered.
+    pub known: Vec<KnownNode>,
 }
 
 impl Settings {
@@ -49,29 +84,85 @@ impl Settings {
         }
     }
 
-    /// Every address worth probing, primary first.
-    pub fn candidates(&self) -> Vec<(Which, String)> {
+    /// The two addresses the user configured, primary first.
+    ///
+    /// Probed on every poll, which is two requests and what this app has always
+    /// cost. The fleet's other nodes are a separate list on purpose: they are
+    /// only worth a request once these two have stopped answering.
+    pub fn configured_candidates(&self) -> Vec<Candidate> {
         let mut out = Vec::new();
         if let Some(p) = self.address(Which::Primary) {
-            out.push((Which::Primary, p.to_string()));
+            out.push(Candidate {
+                slot: Some(Which::Primary),
+                address: p.to_string(),
+                name: None,
+            });
         }
         if let Some(a) = self.address(Which::Alternate) {
             if a != self.primary {
-                out.push((Which::Alternate, a.to_string()));
+                out.push(Candidate {
+                    slot: Some(Which::Alternate),
+                    address: a.to_string(),
+                    name: None,
+                });
             }
         }
         out
     }
 
-    /// Reverse lookup: which slot holds `address`?
-    pub fn which_of(&self, address: &str) -> Option<Which> {
-        if self.address(Which::Primary) == Some(address) {
-            Some(Which::Primary)
-        } else if self.address(Which::Alternate) == Some(address) {
-            Some(Which::Alternate)
-        } else {
-            None
+    /// The fleet's other nodes, in the order the fleet reported them (master
+    /// first), with anything already configured left out.
+    pub fn fleet_candidates(&self) -> Vec<Candidate> {
+        let configured: Vec<String> = self
+            .configured_candidates()
+            .into_iter()
+            .map(|c| c.address)
+            .collect();
+        let mut out: Vec<Candidate> = Vec::new();
+        for node in &self.known {
+            if node.address.is_empty()
+                || configured.iter().any(|a| a == &node.address)
+                || out.iter().any(|c| c.address == node.address)
+            {
+                continue;
+            }
+            out.push(Candidate {
+                slot: None,
+                address: node.address.clone(),
+                name: Some(node.name.clone()).filter(|n| !n.is_empty()),
+            });
         }
+        out
+    }
+
+    /// Replace the learned node list. True when it actually changed, which is
+    /// what decides whether the store is written: the poller runs every ten
+    /// seconds and a fleet that has not changed must not mean a disk write.
+    pub fn set_known(&mut self, nodes: Vec<KnownNode>) -> bool {
+        let mut deduped: Vec<KnownNode> = Vec::new();
+        for node in nodes {
+            if node.address.is_empty() || deduped.iter().any(|k| k.address == node.address) {
+                continue;
+            }
+            deduped.push(node);
+            if deduped.len() >= MAX_KNOWN {
+                break;
+            }
+        }
+        if deduped == self.known {
+            return false;
+        }
+        self.known = deduped;
+        true
+    }
+
+    /// The name the fleet gave this address, if it gave one.
+    pub fn name_of(&self, address: &str) -> Option<&str> {
+        self.known
+            .iter()
+            .find(|k| k.address == address)
+            .map(|k| k.name.as_str())
+            .filter(|n| !n.is_empty())
     }
 }
 
@@ -163,10 +254,18 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     let last_good = store
         .get(KEY_LAST_GOOD)
         .and_then(|v| serde_json::from_value::<Which>(v).ok());
+    // A store written by an older build has no `known` key, and a partly
+    // unreadable one must not cost the app its addresses: an unparsable list
+    // reads as an empty one, which is exactly the behaviour before it existed.
+    let known = store
+        .get(KEY_KNOWN)
+        .and_then(|v| serde_json::from_value::<Vec<KnownNode>>(v).ok())
+        .unwrap_or_default();
     Settings {
         primary: as_str(KEY_PRIMARY).unwrap_or_default(),
         alternate: as_str(KEY_ALTERNATE),
         last_good,
+        known,
     }
 }
 
@@ -185,6 +284,11 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), S
         None => {
             store.delete(KEY_LAST_GOOD);
         }
+    }
+    if settings.known.is_empty() {
+        store.delete(KEY_KNOWN);
+    } else if let Ok(v) = serde_json::to_value(&settings.known) {
+        store.set(KEY_KNOWN, v);
     }
     store.save().map_err(|e| e.to_string())
 }
@@ -236,26 +340,101 @@ mod tests {
         assert!(normalize_address("[fd00::1:3000").is_err());
     }
 
+    fn known(name: &str, address: &str) -> KnownNode {
+        KnownNode {
+            name: name.into(),
+            address: address.into(),
+        }
+    }
+
+    /// Every address the app would try, in order: what the two probe waves add
+    /// up to.
+    fn all(s: &Settings) -> Vec<String> {
+        let mut out = s.configured_candidates();
+        out.extend(s.fleet_candidates());
+        out.into_iter().map(|c| c.address).collect()
+    }
+
     #[test]
     fn candidates_skip_empty_and_duplicate_alternate() {
         let s = Settings {
             primary: "a:3000".into(),
             alternate: Some("a:3000".into()),
-            last_good: None,
+            ..Settings::default()
         };
-        assert_eq!(s.candidates(), vec![(Which::Primary, "a:3000".to_string())]);
+        assert_eq!(all(&s), vec!["a:3000".to_string()]);
 
         let s = Settings {
             primary: "a:3000".into(),
             alternate: Some("b:3000".into()),
-            last_good: None,
+            ..Settings::default()
         };
-        assert_eq!(s.candidates().len(), 2);
-        assert_eq!(s.which_of("b:3000"), Some(Which::Alternate));
-        assert_eq!(s.which_of("c:3000"), None);
+        assert_eq!(s.configured_candidates().len(), 2);
+        assert_eq!(s.configured_candidates()[1].slot, Some(Which::Alternate));
+        assert_eq!(s.address(Which::Alternate), Some("b:3000"));
 
         let s = Settings::default();
         assert!(!s.is_configured());
-        assert!(s.candidates().is_empty());
+        assert!(all(&s).is_empty());
+    }
+
+    #[test]
+    fn fleet_candidates_come_after_the_configured_pair_and_never_repeat_it() {
+        let s = Settings {
+            primary: "a:3000".into(),
+            alternate: Some("b:3000".into()),
+            known: vec![
+                // The master is usually one of the two already configured.
+                known("Spark-1", "a:3000"),
+                known("Spark-2", "c:3000"),
+                known("Spark-3", "d:3000"),
+            ],
+            ..Settings::default()
+        };
+        assert_eq!(all(&s), vec!["a:3000", "b:3000", "c:3000", "d:3000"]);
+        // A learned node carries its name, so the app can say which one served.
+        assert_eq!(s.fleet_candidates()[0].name.as_deref(), Some("Spark-2"));
+        assert_eq!(s.fleet_candidates()[0].slot, None);
+        assert_eq!(s.name_of("c:3000"), Some("Spark-2"));
+        assert_eq!(s.name_of("a:3000"), Some("Spark-1"));
+        assert_eq!(s.name_of("zz:3000"), None);
+    }
+
+    #[test]
+    fn set_known_reports_change_dedupes_and_caps() {
+        let mut s = Settings::default();
+        assert!(s.set_known(vec![known("Spark-1", "a:3000")]));
+        // Same list again: no change, so nothing is written to disk.
+        assert!(!s.set_known(vec![known("Spark-1", "a:3000")]));
+        // A renamed node IS a change.
+        assert!(s.set_known(vec![known("Spark-1-DGX", "a:3000")]));
+
+        // Duplicates by address collapse, and rows with no address are dropped.
+        let mut s = Settings::default();
+        s.set_known(vec![
+            known("Spark-1", "a:3000"),
+            known("Spark-1 again", "a:3000"),
+            known("nowhere", ""),
+        ]);
+        assert_eq!(s.known, vec![known("Spark-1", "a:3000")]);
+
+        let many: Vec<KnownNode> = (0..40)
+            .map(|i| known(&format!("n{i}"), &format!("h{i}:3000")))
+            .collect();
+        let mut s = Settings::default();
+        s.set_known(many);
+        assert_eq!(s.known.len(), MAX_KNOWN);
+    }
+
+    #[test]
+    fn an_empty_fleet_list_leaves_todays_behaviour_exactly() {
+        // What a node older than /api/cluster/endpoint gives us: nothing.
+        let s = Settings {
+            primary: "a:3000".into(),
+            alternate: Some("b:3000".into()),
+            ..Settings::default()
+        };
+        assert!(s.fleet_candidates().is_empty());
+        assert_eq!(all(&s), vec!["a:3000", "b:3000"]);
     }
 }
