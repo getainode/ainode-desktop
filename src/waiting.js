@@ -18,7 +18,19 @@
         return;
       }
       primary.textContent = s.primary;
-      also.textContent = s.alternate ? "also trying " + s.alternate : "";
+      // Say that the fleet is being tried too. A cluster's other nodes serve
+      // the same models, so an outage on the configured address is not an
+      // outage, and the page should not imply that it is.
+      const parts = [];
+      if (s.alternate) parts.push("also trying " + s.alternate);
+      if (s.fleet_count) {
+        parts.push(
+          s.fleet_count === 1
+            ? "and 1 other node of the fleet"
+            : "and " + s.fleet_count + " other nodes of the fleet"
+        );
+      }
+      also.textContent = parts.join(" ");
       reason.textContent = s.last_error || "";
     } catch (e) {
       reason.textContent = String(e);

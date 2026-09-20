@@ -17,16 +17,18 @@ Two fields sit behind that question:
 
 Each field has a **Test** button that calls `/api/status` and shows the node name and AINode version that answered. On launch the app probes both addresses at once (2 second timeout), uses whichever answers, and remembers which one worked so the next launch tries it first. The first launch with nothing saved opens this screen.
 
-Settings are stored in the app data folder (`~/Library/Application Support/ai.ainode.desktop/settings.json` on macOS, `%APPDATA%\ai.ainode.desktop\settings.json` on Windows).
+There is no third field, and there does not need to be. Every AINode routes every model the fleet serves, so any node can answer for the cluster. On every successful poll the app saves the fleet's own list of addresses (`endpoint_hint` on `/api/status`, or `GET /api/cluster/endpoint`, both of which every node answers). When neither configured address answers, it tries those saved nodes in order, master first, and keeps working from whichever one does: the Settings screen and the menu bar then say **Connected through Spark-2**. As soon as the primary answers again the app goes back to it. Nodes older than AINode 0.5.28 report no such list, and then the app behaves exactly as it did before: the two addresses and nothing else.
+
+Settings are stored in the app data folder (`~/Library/Application Support/ai.ainode.desktop/settings.json` on macOS, `%APPDATA%\ai.ainode.desktop\settings.json` on Windows). The saved fleet list lives in the same file, under `known`; it is a cache, not a setting, and pointing the app at a different address clears it.
 
 ## What you get
 
-- **Main window**: the AINode web UI at `http://<master>/`. If the master is unreachable, a bundled "Waiting for ..." page takes over and retries every 5 seconds. If the master restarts mid-session, the app notices within about 15 seconds, shows the waiting page, and goes back to the UI when the master answers again. Closing the window hides it; the app keeps running in the menu bar. Cmd+Q quits.
+- **Main window**: the AINode web UI at `http://<master>/`. If that node is unreachable the window follows whichever node still answers, and only when nothing in the fleet does at all does a bundled "Waiting for ..." page take over and retry every 5 seconds. If the master restarts mid-session, the app notices within about 15 seconds, shows the waiting page, and goes back to the UI when the master answers again. Closing the window hides it; the app keeps running in the menu bar. Cmd+Q quits.
 - **Menu bar item**: polls `/api/nodes` every 10 seconds and shows a title like `AINode · 6 nodes · 5 models`. The menu lists every node as `name · model or load progress · online/offline`, followed by Settings, Refresh, About and Quit.
 - **Notifications**: when a node goes from loading to ready you get `Model is ready on Node (loaded in N min)`. When a node goes offline or comes back, you get one notification each way. Nothing fires on the first poll after launch.
 - **About**: `AINode Desktop 0.1.1 · Made in Texas` and a link to [ainode.dev](https://ainode.dev).
 
-The app only ever reads from the master (`GET /api/status`, `GET /api/nodes`). Everything you do inside the web UI goes through the UI itself, exactly as it would in a browser.
+The app only ever reads from the master (`GET /api/status`, `GET /api/nodes`, and `GET /api/cluster/endpoint` when a node's status carries no `endpoint_hint`). Everything you do inside the web UI goes through the UI itself, exactly as it would in a browser.
 
 ## Screenshots
 

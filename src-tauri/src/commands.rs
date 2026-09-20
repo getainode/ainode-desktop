@@ -22,6 +22,13 @@ pub struct StatusView {
     pub master: Option<String>,
     pub last_error: Option<String>,
     pub node_count: usize,
+    /// The name of the node serving right now, when it gave one.
+    pub serving_name: Option<String>,
+    /// "Connected through Spark-2", or null while on the primary: the pages
+    /// show it verbatim rather than each writing the sentence itself.
+    pub serving_via: Option<String>,
+    /// How many fleet addresses are saved as fallbacks.
+    pub fleet_count: usize,
 }
 
 #[derive(Serialize)]
@@ -52,6 +59,8 @@ pub fn get_settings(state: State<'_, AppState>) -> SettingsView {
 #[tauri::command]
 pub fn get_status_view(state: State<'_, AppState>) -> StatusView {
     let s = state.settings();
+    let serving = state.serving();
+    let fleet_count = s.fleet_candidates().len();
     StatusView {
         configured: s.is_configured(),
         primary: s.primary,
@@ -59,6 +68,9 @@ pub fn get_status_view(state: State<'_, AppState>) -> StatusView {
         master: state.master(),
         last_error: state.last_error(),
         node_count: state.rows().len(),
+        serving_name: serving.as_ref().and_then(|v| v.name.clone()),
+        serving_via: serving.as_ref().and_then(crate::state::Serving::via_label),
+        fleet_count,
     }
 }
 
@@ -102,6 +114,11 @@ pub fn save_settings(
         primary: primary.clone(),
         alternate: alternate.clone(),
         last_good: if changed { None } else { previous.last_good },
+        // A new address can mean a different fleet, and the old fleet's nodes
+        // may still be answering: keeping them could quietly connect the app to
+        // the cluster the user just pointed it away from. The first successful
+        // poll fills the list back in from whoever answers.
+        known: if changed { Vec::new() } else { previous.known },
     };
     config::save(&app, &settings)?;
     if let Ok(mut s) = state.settings.lock() {
