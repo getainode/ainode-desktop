@@ -39,6 +39,16 @@
       <div class="hint">A second way to reach the same node, like its tailnet address. The app uses whichever one answers, and falls back to any other node of the fleet if neither does.</div>
     </div>
 
+    <div class="field">
+      <label for="api-key">API key <span style="color: var(--text-3); font-weight: 400;">(optional)</span></label>
+      <div class="row">
+        <input type="password" id="api-key" placeholder="leave empty unless your node asks for one" autocomplete="off" spellcheck="false">
+        <button type="button" id="show-key">Show</button>
+      </div>
+      <div class="result" id="result-api-key"></div>
+      <div class="hint">Only needed if the node has <code>ainode auth</code> turned on. Run <code>ainode auth key create</code> on the node to get one. It is sent on every request, so a node with a key is worth serving over https: run <code>ainode tls enable --tailscale</code> on it.</div>
+    </div>
+
     <div class="error" id="error"></div>
 
     <div class="actions">

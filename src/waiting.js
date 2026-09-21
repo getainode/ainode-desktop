@@ -31,7 +31,10 @@
         );
       }
       also.textContent = parts.join(" ");
-      reason.textContent = s.last_error || "";
+      // A node that answered "give me a key" is up, and a certificate this
+      // machine will not verify has a fix; either one belongs on screen ahead of
+      // "nothing answered", which is what last_error says.
+      reason.textContent = s.needs_attention || s.last_error || "";
     } catch (e) {
       reason.textContent = String(e);
     }

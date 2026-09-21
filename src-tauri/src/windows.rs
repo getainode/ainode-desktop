@@ -150,8 +150,12 @@ fn navigate_main(app: &AppHandle, url: Url) {
 
 /// Main window shows the AINode UI on `address`. If the window is already on
 /// that master (maybe deep in some page), leave it alone.
-pub fn show_master(app: &AppHandle, address: &str) {
-    let target = Url::parse(&api::ui_url(address)).expect("address was validated");
+///
+/// `tls` decides the scheme, and it is the reason the origin comparison below
+/// checks the scheme too: http and https on one node are two origins, and the
+/// window has to actually move when a node gains a certificate.
+pub fn show_master(app: &AppHandle, address: &str, tls: bool) {
+    let target = Url::parse(&api::ui_url(address, tls)).expect("address was validated");
     let Ok(main) = ensure_main(app) else { return };
     if let Ok(current) = main.url() {
         let same_origin = current.scheme() == target.scheme()
@@ -179,7 +183,9 @@ pub fn reload_main(app: &AppHandle) {
     match state.master() {
         Some(address) => {
             if let Ok(main) = ensure_main(app) {
-                let target = Url::parse(&api::ui_url(&address)).expect("address was validated");
+                let tls = state.serving().is_some_and(|s| s.tls);
+                let target =
+                    Url::parse(&api::ui_url(&address, tls)).expect("address was validated");
                 let _ = main.navigate(target);
             }
         }

@@ -18,6 +18,8 @@ pub struct Serving {
     pub name: Option<String>,
     /// True when this is the primary address out of Settings.
     pub is_primary: bool,
+    /// True when this connection is https, which is what the lock means.
+    pub tls: bool,
 }
 
 impl Serving {
@@ -33,6 +35,20 @@ impl Serving {
     }
 }
 
+/// The lock shown next to a title when the connection is encrypted.
+pub const LOCK: &str = "\u{1f512}";
+
+/// Something the user can fix, in the words to show and the shape to switch on.
+///
+/// Two fields rather than one string, so the menu bar does not decide what kind
+/// of problem this is by looking inside a sentence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attention {
+    /// True when a node answered 401: it is up, and it wants a key.
+    pub wants_key: bool,
+    pub message: String,
+}
+
 pub struct AppState {
     pub client: reqwest::Client,
     /// The one setting, as last loaded or saved.
@@ -45,6 +61,17 @@ pub struct AppState {
     /// `/api/cluster/endpoint`: a node older than the fleet list. Asked once
     /// per session, not every ten seconds.
     pub endpoint_absent: Mutex<HashSet<String>>,
+    /// Hosts whose certificate this machine would not verify.
+    ///
+    /// Session memory, not settings: the fix is on the node or in the trust
+    /// store, and a restart is how the app finds out it was applied. While a host
+    /// is in here its https port is not dialled, so the node stays reachable over
+    /// http and the reason stays on screen.
+    pub tls_rejected: Mutex<HashSet<String>>,
+    /// The last probe round's actionable reason ("this node wants an API key"),
+    /// or None. Kept beside `last_error` because it survives a round where
+    /// something else answered.
+    pub needs_attention: Mutex<Option<Attention>>,
     /// Memory for the notification state machine.
     pub fleet: Mutex<FleetState>,
     /// Last good `/api/nodes` snapshot, for the tray menu.
@@ -63,6 +90,8 @@ impl AppState {
             master: Mutex::new(None),
             serving: Mutex::new(None),
             endpoint_absent: Mutex::new(HashSet::new()),
+            tls_rejected: Mutex::new(HashSet::new()),
+            needs_attention: Mutex::new(None),
             fleet: Mutex::new(FleetState::new()),
             rows: Mutex::new(Vec::new()),
             last_error: Mutex::new(None),
@@ -131,6 +160,40 @@ impl AppState {
         }
     }
 
+    /// The hosts whose https this session has given up on.
+    pub fn tls_rejected(&self) -> HashSet<String> {
+        self.tls_rejected
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remember that a host's certificate did not verify. True when it is news,
+    /// which is what decides whether it is worth saying out loud.
+    pub fn reject_tls(&self, host: &str) -> bool {
+        match self.tls_rejected.lock() {
+            Ok(mut set) => set.insert(host.to_string()),
+            Err(_) => false,
+        }
+    }
+
+    /// Forget the rejections, for a Save that may have pointed somewhere new.
+    pub fn clear_tls_rejected(&self) {
+        if let Ok(mut set) = self.tls_rejected.lock() {
+            set.clear();
+        }
+    }
+
+    pub fn needs_attention(&self) -> Option<Attention> {
+        self.needs_attention.lock().ok().and_then(|e| e.clone())
+    }
+
+    pub fn set_needs_attention(&self, reason: Option<Attention>) {
+        if let Ok(mut e) = self.needs_attention.lock() {
+            *e = reason;
+        }
+    }
+
     pub fn last_error(&self) -> Option<String> {
         self.last_error.lock().ok().and_then(|e| e.clone())
     }
@@ -152,6 +215,7 @@ mod tests {
             address: "a:3000".into(),
             name: Some("Spark-1".into()),
             is_primary: true,
+            tls: false,
         };
         assert_eq!(home.via_label(), None, "the primary needs no explanation");
 
@@ -159,6 +223,7 @@ mod tests {
             address: "b:3000".into(),
             name: Some("Spark-2".into()),
             is_primary: false,
+            tls: true,
         };
         assert_eq!(
             away.via_label().as_deref(),
@@ -169,6 +234,7 @@ mod tests {
             address: "b:3000".into(),
             name: None,
             is_primary: false,
+            tls: false,
         };
         assert_eq!(
             nameless.via_label().as_deref(),
