@@ -58,9 +58,17 @@ pub fn update(app: &AppHandle, rows: &[NodeRow], serving: Option<&Serving>, conf
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
+    // "offline" is for a node that did not answer. A node that answered "give me
+    // a key" IS up, and saying offline about it sent people to look at a machine
+    // that was working perfectly.
+    let attention = app.state::<crate::state::AppState>().needs_attention();
     let title = match (configured, serving) {
         (false, _) => "AINode".to_string(),
-        (true, None) => "AINode · offline".to_string(),
+        (true, None) => match &attention {
+            Some(a) if a.wants_key => "AINode · needs a key".to_string(),
+            Some(_) => "AINode · certificate".to_string(),
+            None => "AINode · offline".to_string(),
+        },
         (true, Some(_)) if rows.is_empty() => "AINode".to_string(),
         (true, Some(s)) => match s.name.as_deref().filter(|_| !s.is_primary) {
             // Working through a fallback is worth one word in the menu bar: the
@@ -70,11 +78,47 @@ pub fn update(app: &AppHandle, rows: &[NodeRow], serving: Option<&Serving>, conf
             None => nodes::tray_title(rows),
         },
     };
+    // The lock is the whole report on the transport: it is there when the
+    // connection in use is https and absent otherwise, never a claim about what
+    // the node could do.
+    let title = match serving {
+        Some(s) if s.tls => format!("{} {title}", crate::state::LOCK),
+        _ => title,
+    };
     let _ = tray.set_title(Some(&title));
     let _ = tray.set_tooltip(Some(&title));
     if let Ok(menu) = build_menu(app, rows, serving, configured) {
         let _ = tray.set_menu(Some(menu));
     }
+}
+
+/// Break a sentence into menu-width lines on word boundaries.
+///
+/// A menu item does not wrap, and the certificate reason is a sentence with a
+/// command in it, so a single item would be clipped at whatever width the menu
+/// happens to be. Capped at three lines: past that the Settings window is the
+/// place to read it.
+fn wrapped(text: &str) -> Vec<String> {
+    const WIDTH: usize = 52;
+    const MAX_LINES: usize = 3;
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > WIDTH {
+            lines.push(std::mem::take(&mut line));
+            if lines.len() == MAX_LINES {
+                return lines;
+            }
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 fn build_menu<R: Runtime>(
@@ -101,7 +145,19 @@ fn build_menu<R: Runtime>(
             .build(app)?;
         b = b.item(&hint);
     } else if serving.is_none() {
-        let settings = app.state::<crate::state::AppState>().settings();
+        let state = app.state::<crate::state::AppState>();
+        let settings = state.settings();
+        // The actionable reason first, if there is one. "This node wants an API
+        // key" is a thing to go and fix; "Waiting for 10.0.0.5:3000" is not.
+        if let Some(reason) = state.needs_attention() {
+            for (i, line) in wrapped(&reason.message).into_iter().enumerate() {
+                let item = MenuItemBuilder::with_id(format!("attention-{i}"), line)
+                    .enabled(false)
+                    .build(app)?;
+                b = b.item(&item);
+            }
+            b = b.separator();
+        }
         let hint = MenuItemBuilder::with_id("hint", format!("Waiting for {}", settings.primary))
             .enabled(false)
             .build(app)?;
@@ -112,7 +168,7 @@ fn build_menu<R: Runtime>(
                 .build(app)?;
             b = b.item(&hint2);
         }
-        let fleet = settings.fleet_candidates().len();
+        let fleet = settings.fleet_candidates(&state.tls_rejected()).len();
         if fleet > 0 {
             let hint3 = MenuItemBuilder::with_id(
                 "hint-fleet",
@@ -150,4 +206,36 @@ fn build_menu<R: Runtime>(
         .separator()
         .item(&quit)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reason_is_broken_into_menu_width_lines_on_word_boundaries() {
+        let reason =
+            crate::api::ProbeError::Certificate("self-signed certificate".into()).message();
+        let lines = wrapped(&reason);
+        assert!(lines.len() > 1, "the certificate sentence needs wrapping");
+        assert!(
+            lines.len() <= 3,
+            "capped, so the menu does not become a page"
+        );
+        for line in &lines {
+            assert!(line.chars().count() <= 52, "too wide: {line}");
+            assert_eq!(line.trim(), line, "a menu line with edge whitespace");
+        }
+        // And it wraps rather than truncating mid-word.
+        assert!(lines[0].split_whitespace().count() > 1);
+    }
+
+    #[test]
+    fn a_short_reason_stays_one_line() {
+        assert_eq!(
+            wrapped("this node wants an API key"),
+            vec!["this node wants an API key".to_string()]
+        );
+        assert!(wrapped("").is_empty());
+    }
 }

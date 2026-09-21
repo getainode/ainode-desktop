@@ -1,6 +1,6 @@
 [package]
 name = "ainode-desktop"
-version = "0.1.1"
+version = "0.2.0"
 description = "AINode on your desktop: point it at your master node and go."
 authors = ["AINode contributors"]
 license = "Apache-2.0"
@@ -20,7 +20,12 @@ tauri = { version = "=2.11.5", features = ["tray-icon", "image-png", "image-ico"
 tauri-plugin-store = "=2.4.5"
 tauri-plugin-notification = "=2.4.0"
 tauri-plugin-opener = "=2.5.5"
-reqwest = { version = "=0.13.5", default-features = false, features = ["json"] }
+# native-tls rather than reqwest's default rustls: on macOS it is
+# Security.framework and on Windows schannel, so "add the certificate to your
+# trust store" is advice that actually works, and neither platform needs a build
+# dependency for it (no cmake, no nasm, no vendored openssl in either release
+# workflow). The app only ever verifies; nothing here can be told to skip it.
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "native-tls"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tokio = { version = "=1.53.1", features = ["time", "sync", "macros"] }

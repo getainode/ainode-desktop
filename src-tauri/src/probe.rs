@@ -8,8 +8,9 @@
 //! The pick is a pure function over `(address, answered)` pairs so every rule
 //! below is tested against canned results.
 
-use crate::api::{self, Status};
-use crate::config::{Candidate, Settings, Which};
+use crate::api::{self, ProbeError, Status};
+use crate::config::{host_of, Candidate, Settings, Which};
+use std::collections::HashSet;
 
 /// Outcome of one probe.
 #[derive(Clone, Debug, PartialEq)]
@@ -17,15 +18,31 @@ pub struct Probe {
     /// The configured slot, or None for an address learned from the fleet.
     pub slot: Option<Which>,
     pub address: String,
+    /// Whether this address was dialled over https.
+    pub tls: bool,
     /// The node's name: its own word from `/api/status` once it answered,
     /// otherwise whatever the fleet list called it.
     pub name: Option<String>,
-    pub result: Result<Status, String>,
+    pub result: Result<Status, ProbeError>,
 }
 
 impl Probe {
     pub fn ok(&self) -> bool {
         self.result.is_ok()
+    }
+
+    /// The error, when there was one.
+    pub fn error(&self) -> Option<&ProbeError> {
+        self.result.as_ref().err()
+    }
+
+    /// The host whose certificate this app could not verify, if that is what
+    /// happened here. The caller remembers it for the session and falls back to
+    /// this node's http port on the next poll.
+    pub fn rejected_host(&self) -> Option<String> {
+        self.error()
+            .filter(|e| e.is_certificate())
+            .map(|_| host_of(&self.address))
     }
 
     /// The name to show for the node that answered.
@@ -69,16 +86,28 @@ pub fn choose(
 }
 
 /// Probe a set of candidates at once.
-pub async fn probe_all(client: &reqwest::Client, candidates: &[Candidate]) -> Vec<Probe> {
+pub async fn probe_all(
+    client: &reqwest::Client,
+    candidates: &[Candidate],
+    api_key: Option<&str>,
+) -> Vec<Probe> {
     let futures = candidates.iter().map(|candidate| {
         let candidate = candidate.clone();
         // reqwest clients are cheap handles around a shared pool.
         let client = client.clone();
+        let api_key = api_key.map(str::to_string);
         async move {
-            let result = api::fetch_status(&client, &candidate.address).await;
+            let result = api::fetch_status(
+                &client,
+                &candidate.address,
+                candidate.tls,
+                api_key.as_deref(),
+            )
+            .await;
             Probe {
                 slot: candidate.slot,
                 address: candidate.address,
+                tls: candidate.tls,
                 name: candidate.name,
                 result,
             }
@@ -90,14 +119,20 @@ pub async fn probe_all(client: &reqwest::Client, candidates: &[Candidate]) -> Ve
 /// The addresses to try first: the configured pair, plus the one in use when it
 /// is a fleet node (so a working fallback is not dropped for a wave two it was
 /// never in).
-fn first_wave(settings: &Settings, current: Option<&str>) -> Vec<Candidate> {
-    let mut wave = settings.configured_candidates();
+fn first_wave(
+    settings: &Settings,
+    current: Option<&str>,
+    rejected: &HashSet<String>,
+) -> Vec<Candidate> {
+    let mut wave = settings.configured_candidates(rejected);
     if let Some(address) = current.filter(|a| !a.is_empty()) {
+        let (address, tls) = settings.upgrade(address, rejected);
         if !wave.iter().any(|c| c.address == address) {
             wave.push(Candidate {
                 slot: None,
-                address: address.to_string(),
-                name: settings.name_of(address).map(str::to_string),
+                name: settings.name_of(&address).map(str::to_string),
+                address,
+                tls,
             });
         }
     }
@@ -108,31 +143,88 @@ fn first_wave(settings: &Settings, current: Option<&str>) -> Vec<Candidate> {
 ///
 /// Wave one is [`first_wave`]. Wave two, only if none of it answered, is every
 /// remaining fleet node in the order the fleet reported them, master first.
+///
+/// `rejected` is the set of hosts whose certificate this session could not
+/// verify; every address is upgraded to https through it, so a rejection means
+/// one failed poll and then the same node over http.
 pub async fn find_master(
     client: &reqwest::Client,
     settings: &Settings,
     current: Option<&str>,
-) -> Option<Probe> {
-    let mut probes = probe_all(client, &first_wave(settings, current)).await;
+    rejected: &HashSet<String>,
+) -> Attempt {
+    let key = settings.key();
+    let mut probes = probe_all(client, &first_wave(settings, current, rejected), key).await;
     if !probes.iter().any(Probe::ok) {
         let tried: Vec<String> = probes.iter().map(|p| p.address.clone()).collect();
         let rest: Vec<Candidate> = settings
-            .fleet_candidates()
+            .fleet_candidates(rejected)
             .into_iter()
             .filter(|c| !tried.iter().any(|a| a == &c.address))
             .collect();
         if !rest.is_empty() {
-            probes.extend(probe_all(client, &rest).await);
+            probes.extend(probe_all(client, &rest, key).await);
         }
     }
+    let primary = settings.upgrade(&settings.primary, rejected).0;
     let preferred = current.map(str::to_string).or_else(|| {
         settings
             .last_good
-            .and_then(|w| settings.address(w).map(str::to_string))
+            .and_then(|w| settings.address(w).map(|a| settings.upgrade(a, rejected).0))
     });
     let flags: Vec<(String, bool)> = probes.iter().map(|p| (p.address.clone(), p.ok())).collect();
-    let pick = choose(&flags, &settings.primary, preferred.as_deref())?;
-    probes.into_iter().find(|p| p.address == pick)
+    let chosen = choose(&flags, &primary, preferred.as_deref())
+        .and_then(|pick| probes.iter().position(|p| p.address == pick))
+        .map(|i| probes.remove(i));
+    Attempt { chosen, probes }
+}
+
+/// What one round of probing found.
+///
+/// `chosen` keeps exactly the old meaning: the address to use, or None when
+/// nothing answered. The rest of the round is kept beside it because the REASON
+/// nothing answered is now worth saying: a node that wants a key is not offline,
+/// and a certificate this machine does not trust is a sentence with a fix in it.
+#[derive(Debug)]
+pub struct Attempt {
+    pub chosen: Option<Probe>,
+    /// Every probe of this round except the chosen one.
+    pub probes: Vec<Probe>,
+}
+
+impl Attempt {
+    /// Hosts whose certificate could not be verified, to remember for the session.
+    pub fn rejected_hosts(&self) -> Vec<String> {
+        self.probes
+            .iter()
+            .chain(self.chosen.iter())
+            .filter_map(Probe::rejected_host)
+            .collect()
+    }
+
+    /// True when something answered "give me a key".
+    pub fn wants_key(&self) -> bool {
+        self.failures().any(ProbeError::is_unauthorized)
+    }
+
+    fn failures(&self) -> impl Iterator<Item = &ProbeError> {
+        self.probes
+            .iter()
+            .chain(self.chosen.iter())
+            .filter_map(Probe::error)
+    }
+
+    /// The one failure worth putting on screen, or None.
+    ///
+    /// Ordered by how actionable it is: a key to paste, then a certificate to
+    /// fix, and nothing at all for "no answer", which the caller already has
+    /// better words for (it knows which addresses it tried).
+    pub fn explanation(&self) -> Option<String> {
+        self.failures()
+            .find(|e| e.is_unauthorized())
+            .or_else(|| self.failures().find(|e| e.is_certificate()))
+            .map(ProbeError::message)
+    }
 }
 
 /// Run a handful of futures concurrently without pulling in the whole
@@ -166,23 +258,28 @@ mod tests {
         pairs.iter().map(|(a, ok)| (a.to_string(), *ok)).collect()
     }
 
+    fn known(name: &str, address: &str) -> KnownNode {
+        KnownNode {
+            name: name.into(),
+            address: address.into(),
+            tls_port: None,
+        }
+    }
+
+    /// No host has had its certificate refused: what every test here means
+    /// unless it is about TLS.
+    fn trusted() -> HashSet<String> {
+        HashSet::new()
+    }
+
     fn settings() -> Settings {
         Settings {
             primary: P.into(),
             alternate: Some(A.into()),
             known: vec![
-                KnownNode {
-                    name: "Spark-1".into(),
-                    address: P.into(),
-                },
-                KnownNode {
-                    name: "Spark-2".into(),
-                    address: N2.into(),
-                },
-                KnownNode {
-                    name: "Spark-3".into(),
-                    address: N3.into(),
-                },
+                known("Spark-1", P),
+                known("Spark-2", N2),
+                known("Spark-3", N3),
             ],
             ..Settings::default()
         }
@@ -266,7 +363,7 @@ mod tests {
     #[test]
     fn wave_one_is_the_configured_pair_plus_the_address_in_use() {
         let s = settings();
-        let wave: Vec<String> = first_wave(&s, None)
+        let wave: Vec<String> = first_wave(&s, None, &trusted())
             .into_iter()
             .map(|c| c.address)
             .collect();
@@ -274,7 +371,7 @@ mod tests {
 
         // Serving through a fleet node: it is probed in wave one, so a working
         // fallback never has to wait for a second round.
-        let wave: Vec<Candidate> = first_wave(&s, Some(N3));
+        let wave: Vec<Candidate> = first_wave(&s, Some(N3), &trusted());
         assert_eq!(
             wave.iter().map(|c| c.address.clone()).collect::<Vec<_>>(),
             vec![P, A, N3]
@@ -282,7 +379,7 @@ mod tests {
         assert_eq!(wave[2].name.as_deref(), Some("Spark-3"));
 
         // Already in the pair: not probed twice.
-        let wave: Vec<String> = first_wave(&s, Some(A))
+        let wave: Vec<String> = first_wave(&s, Some(A), &trusted())
             .into_iter()
             .map(|c| c.address)
             .collect();
@@ -296,12 +393,163 @@ mod tests {
             alternate: Some(A.into()),
             ..Settings::default()
         };
-        let wave: Vec<String> = first_wave(&s, None)
+        let wave: Vec<String> = first_wave(&s, None, &trusted())
             .into_iter()
             .map(|c| c.address)
             .collect();
         assert_eq!(wave, vec![P, A]);
-        assert!(s.fleet_candidates().is_empty());
+        assert!(s.fleet_candidates(&trusted()).is_empty());
+    }
+
+    // ======================================================================
+    // What a round of probing reports when nothing answers
+    // ======================================================================
+
+    fn failed(address: &str, err: ProbeError) -> Probe {
+        Probe {
+            slot: None,
+            address: address.into(),
+            tls: true,
+            name: None,
+            result: Err(err),
+        }
+    }
+
+    #[test]
+    fn a_certificate_refusal_names_the_host_to_stop_dialling() {
+        let p = failed(
+            "spark-1:3443",
+            ProbeError::Certificate("self-signed".into()),
+        );
+        assert_eq!(p.rejected_host().as_deref(), Some("spark-1"));
+
+        // Only a certificate failure does. A node that is down still gets its
+        // https port dialled next time, because nothing was learned about it.
+        let p = failed("spark-1:3443", ProbeError::Unreachable("refused".into()));
+        assert_eq!(p.rejected_host(), None);
+        let p = failed("spark-1:3443", ProbeError::Unauthorized);
+        assert_eq!(p.rejected_host(), None);
+    }
+
+    #[test]
+    fn the_key_problem_is_reported_ahead_of_the_certificate_and_the_silence() {
+        let attempt = Attempt {
+            chosen: None,
+            probes: vec![
+                failed("a:3443", ProbeError::Unreachable("no answer".into())),
+                failed("b:3443", ProbeError::Certificate("self-signed".into())),
+                failed("c:3000", ProbeError::Unauthorized),
+            ],
+        };
+        assert!(attempt.wants_key());
+        assert_eq!(
+            attempt.explanation().as_deref(),
+            Some("this node wants an API key")
+        );
+        assert_eq!(attempt.rejected_hosts(), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn a_certificate_is_reported_when_that_is_the_only_thing_wrong() {
+        let attempt = Attempt {
+            chosen: None,
+            probes: vec![
+                failed("a:3000", ProbeError::Unreachable("no answer".into())),
+                failed("b:3443", ProbeError::Certificate("unknown issuer".into())),
+            ],
+        };
+        assert!(!attempt.wants_key());
+        let said = attempt
+            .explanation()
+            .expect("a certificate is worth saying");
+        assert!(said.contains("did not check out here"));
+        assert!(said.contains("ainode tls enable --tailscale"));
+    }
+
+    #[test]
+    fn nothing_but_silence_is_left_to_the_callers_own_words() {
+        let attempt = Attempt {
+            chosen: None,
+            probes: vec![failed(
+                "a:3000",
+                ProbeError::Unreachable("no answer".into()),
+            )],
+        };
+        assert_eq!(attempt.explanation(), None);
+        assert!(attempt.rejected_hosts().is_empty());
+    }
+
+    #[test]
+    fn a_refused_certificate_on_the_node_that_is_serving_is_still_noticed() {
+        // The failover case: https failed, http answered, and the app is working
+        // through this node. The rejection still has to be remembered or every
+        // poll pays for the same handshake.
+        let attempt = Attempt {
+            chosen: Some(Probe {
+                slot: Some(Which::Primary),
+                address: "a:3000".into(),
+                tls: false,
+                name: None,
+                result: Ok(Status::default()),
+            }),
+            probes: vec![failed(
+                "a:3443",
+                ProbeError::Certificate("self-signed".into()),
+            )],
+        };
+        assert_eq!(attempt.rejected_hosts(), vec!["a".to_string()]);
+        assert!(attempt.chosen.is_some());
+    }
+
+    #[test]
+    fn the_wave_dials_the_https_port_when_the_fleet_advertised_one() {
+        let s = Settings {
+            primary: "spark-1:3000".into(),
+            known: vec![KnownNode {
+                name: "Spark-1".into(),
+                address: "spark-1:3000".into(),
+                tls_port: Some(3443),
+            }],
+            ..Settings::default()
+        };
+        let wave = first_wave(&s, None, &trusted());
+        assert_eq!(wave.len(), 1);
+        assert_eq!(wave[0].address, "spark-1:3443");
+        assert!(wave[0].tls);
+
+        // And once its certificate has been refused, the same wave is http.
+        let mut rejected = HashSet::new();
+        rejected.insert("spark-1".to_string());
+        let wave = first_wave(&s, None, &rejected);
+        assert_eq!(wave[0].address, "spark-1:3000");
+        assert!(!wave[0].tls);
+    }
+
+    #[test]
+    fn the_address_in_use_is_upgraded_too_rather_than_probed_twice() {
+        // `current` is the address the app is on. It arrives already upgraded, so
+        // upgrading it again must be a no-op rather than a second wave entry.
+        let s = Settings {
+            primary: "a:3000".into(),
+            known: vec![
+                KnownNode {
+                    name: "Spark-1".into(),
+                    address: "a:3000".into(),
+                    tls_port: None,
+                },
+                KnownNode {
+                    name: "Spark-2".into(),
+                    address: "b:3000".into(),
+                    tls_port: Some(3443),
+                },
+            ],
+            ..Settings::default()
+        };
+        let wave = first_wave(&s, Some("b:3443"), &trusted());
+        let addresses: Vec<String> = wave.iter().map(|c| c.address.clone()).collect();
+        assert_eq!(addresses, vec!["a:3000", "b:3443"]);
+        assert!(wave[1].tls);
+        assert_eq!(wave[1].name.as_deref(), Some("Spark-2"));
     }
 
     /// A stub AINode: answers every request with `body` until dropped.
@@ -369,16 +617,14 @@ mod tests {
         let s = Settings {
             primary: dead.clone(),
             alternate: None,
-            known: vec![KnownNode {
-                name: "Spark-2".into(),
-                address: live.address.clone(),
-            }],
+            known: vec![known("Spark-2", &live.address)],
             ..Settings::default()
         };
         let client = api::client();
 
-        let found = find_master(&client, &s, None)
+        let found = find_master(&client, &s, None, &trusted())
             .await
+            .chosen
             .expect("the fleet node answers");
         assert_eq!(found.address, live.address);
         assert!(found.ok());
@@ -391,8 +637,9 @@ mod tests {
 
         // Once we are on that node, it is probed in wave one: still chosen, and
         // the primary is still dead.
-        let again = find_master(&client, &s, Some(&live.address))
+        let again = find_master(&client, &s, Some(&live.address), &trusted())
             .await
+            .chosen
             .expect("still serving");
         assert_eq!(again.address, live.address);
     }
@@ -404,17 +651,15 @@ mod tests {
         let s = Settings {
             primary: home.address.clone(),
             alternate: None,
-            known: vec![KnownNode {
-                name: "Spark-2".into(),
-                address: fallback.address.clone(),
-            }],
+            known: vec![known("Spark-2", &fallback.address)],
             ..Settings::default()
         };
         let client = api::client();
 
         // Working through the fallback, with the primary back up: go home.
-        let found = find_master(&client, &s, Some(&fallback.address))
+        let found = find_master(&client, &s, Some(&fallback.address), &trusted())
             .await
+            .chosen
             .expect("something answers");
         assert_eq!(found.address, home.address);
         assert_eq!(found.slot, Some(Which::Primary));
@@ -425,13 +670,15 @@ mod tests {
         let s = Settings {
             primary: Stub::dead(),
             alternate: Some(Stub::dead()),
-            known: vec![KnownNode {
-                name: "Spark-2".into(),
-                address: Stub::dead(),
-            }],
+            known: vec![known("Spark-2", &Stub::dead())],
             ..Settings::default()
         };
-        assert!(find_master(&api::client(), &s, None).await.is_none());
+        let attempt = find_master(&api::client(), &s, None, &trusted()).await;
+        assert!(attempt.chosen.is_none());
+        // Nothing answered at all, so there is nothing actionable to report: the
+        // caller's own "no answer from ..." line is the better sentence.
+        assert_eq!(attempt.explanation(), None);
+        assert!(!attempt.wants_key());
     }
 
     #[test]
@@ -443,6 +690,7 @@ mod tests {
         let probe = Probe {
             slot: None,
             address: N2.into(),
+            tls: false,
             name: Some("Spark-2".into()),
             result: Ok(status),
         };
@@ -452,8 +700,9 @@ mod tests {
         let probe = Probe {
             slot: None,
             address: N2.into(),
+            tls: false,
             name: Some("Spark-2".into()),
-            result: Err("no answer within 2 seconds".into()),
+            result: Err(ProbeError::Unreachable("no answer within 2 seconds".into())),
         };
         assert_eq!(probe.node_name().as_deref(), Some("Spark-2"));
 
@@ -461,6 +710,7 @@ mod tests {
         let probe = Probe {
             slot: None,
             address: N2.into(),
+            tls: false,
             name: None,
             result: Ok(Status::default()),
         };

@@ -4,6 +4,8 @@
 
   const primary = document.getElementById("primary");
   const alternate = document.getElementById("alternate");
+  const apiKey = document.getElementById("api-key");
+  const showKey = document.getElementById("show-key");
   const error = document.getElementById("error");
   const save = document.getElementById("save");
   const cancel = document.getElementById("cancel");
@@ -27,8 +29,13 @@
     try {
       const r = await invoke("test_address", { address: value });
       const model = r.model ? " · " + r.model.split("/").pop() : "";
-      setResult(id, "ok", r.node_name + " · AINode " + r.version + model);
-      input.value = r.address;
+      // The lock says the test reached it over https, which is the transport the
+      // app will use for it from now on. Never a claim about what it could do.
+      const lock = r.tls ? "\ud83d\udd12 " : "";
+      setResult(id, "ok", lock + r.node_name + " · AINode " + r.version + model);
+      // Not r.address: that is the upgraded https address, and this box holds the
+      // plain one the fleet list is keyed on.
+      input.value = value;
     } catch (e) {
       setResult(id, "bad", "No answer from " + value + ": " + String(e));
     } finally {
@@ -43,6 +50,7 @@
       await invoke("save_settings", {
         primary: primary.value,
         alternate: alternate.value,
+        apiKey: apiKey.value,
       });
       await invoke("close_self");
     } catch (e) {
@@ -56,7 +64,13 @@
   save.addEventListener("click", doSave);
   cancel.addEventListener("click", () => invoke("close_self"));
 
-  for (const input of [primary, alternate]) {
+  showKey.addEventListener("click", () => {
+    const hidden = apiKey.type === "password";
+    apiKey.type = hidden ? "text" : "password";
+    showKey.textContent = hidden ? "Hide" : "Show";
+  });
+
+  for (const input of [primary, alternate, apiKey]) {
     input.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") {
         ev.preventDefault();
@@ -92,12 +106,23 @@
       }
       if (!s.master) {
         serving.className = "result bad";
-        serving.textContent = (s.last_error || "Not connected") + fleetLine(s.fleet_count);
+        // The actionable reason wins: "this node wants an API key" is something
+        // to fix in the box below, and "nothing answered" is not.
+        serving.textContent =
+          (s.needs_attention || s.last_error || "Not connected") + fleetLine(s.fleet_count);
         return;
       }
       const who = s.serving_via || "Connected to " + (s.serving_name || s.master);
+      const lock = s.tls ? "\ud83d\udd12 " : "";
       serving.className = "result ok";
-      serving.textContent = who + " (" + s.master + ")" + fleetLine(s.fleet_count);
+      serving.textContent =
+        lock + who + " (" + (s.tls ? "https" : "http") + "://" + s.master + ")" +
+        fleetLine(s.fleet_count);
+      // A node that is only reached over http and holds a key is worth one line.
+      if (!s.tls && s.has_api_key) {
+        serving.textContent +=
+          " · the key travels in clear text: run `ainode tls enable --tailscale` on the node";
+      }
     } catch (e) {
       serving.className = "result";
       serving.textContent = "";
@@ -107,6 +132,7 @@
   invoke("get_settings").then((s) => {
     primary.value = s.primary || "";
     alternate.value = s.alternate || "";
+    apiKey.value = s.api_key || "";
     primary.focus();
   });
   refreshServing();
