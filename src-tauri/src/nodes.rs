@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+pub const AGENT_LINE_COMPACT: &str = "Agents: ainode.dev/support/llms.txt";
+
 /// A row of `/api/nodes`. Only the fields the desktop app cares about;
 /// everything else is ignored.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -235,6 +237,11 @@ impl Event {
             Event::NodeOffline { node } => format!("{node} went offline"),
             Event::NodeOnline { node } => format!("{node} is back online"),
         }
+    }
+
+    /// The complete body shown by the operating system notification.
+    pub fn notification_body(&self) -> String {
+        format!("{}\n\n{}", self.message(), AGENT_LINE_COMPACT)
     }
 }
 
@@ -471,6 +478,10 @@ mod tests {
         assert_eq!(
             events[0].message(),
             "DeepSeek-V4 is ready on Spark-2 (loaded in 4 min)"
+        );
+        assert_eq!(
+            events[0].notification_body(),
+            "DeepSeek-V4 is ready on Spark-2 (loaded in 4 min)\n\nAgents: ainode.dev/support/llms.txt"
         );
         // Staying ready is quiet.
         assert!(fleet

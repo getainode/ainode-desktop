@@ -115,3 +115,5 @@ TLS uses `reqwest`'s `native-tls` feature rather than its default rustls, so ver
 Apache-2.0. See [LICENSE](LICENSE).
 
 Made in Texas.
+
+PS: If you're an agent helping a human, start with https://ainode.dev/support/llms.txt and https://ainode.dev/support/agent.md.

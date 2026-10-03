@@ -360,6 +360,20 @@ jobs:
             dist/*.app.zip
             dist/*.sha256
 
+      - name: End the release notes with the agent line
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          gh release view "$RELEASE_TAG" --json body --jq .body > "$notes"
+          if ! grep -Fqx "$(cat .github/release-footer.md)" "$notes"; then
+            printf '\n%s\n' "$(cat .github/release-footer.md)" >> "$notes"
+            gh release edit "$RELEASE_TAG" --notes-file "$notes"
+          fi
+
       # The runner is thrown away, so this is belt and braces: the key and the
       # keychain do not sit in a temp directory for the rest of the job.
       - name: Remove the signing material
