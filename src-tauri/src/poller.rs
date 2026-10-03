@@ -305,6 +305,6 @@ fn notify(app: &AppHandle, event: &Event) {
         .notification()
         .builder()
         .title(title)
-        .body(event.message())
+        .body(event.notification_body())
         .show();
 }

@@ -214,6 +214,15 @@ button.link {
   text-align: center;
 }
 
+.footer.agent-line {
+  line-height: 1.5;
+  margin-top: 8px;
+}
+
+.footer.agent-line a {
+  color: var(--green-bright);
+}
+
 /* Waiting page */
 
 .spinner {
