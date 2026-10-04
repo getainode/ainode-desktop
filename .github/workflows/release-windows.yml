@@ -34,7 +34,7 @@ env:
 jobs:
   windows:
     name: Windows x64
-    runs-on: windows-latest
+    runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 90
 
     steps:

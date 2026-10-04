@@ -1,13 +1,12 @@
 # Releasing AINode
 
 The macOS release pipeline lives in `.github/workflows/release.yml`. It builds
-a universal (Apple silicon + Intel) `.app` on a GitHub-hosted Mac, wraps it in
-a `.dmg` and a zip, and attaches both to the GitHub Release for the tag. When
-the Apple secrets exist (they do, since 0.1.1) the app and the disk image are
-signed with the Developer ID certificate, notarized through the App Store
-Connect API key, and stapled; when they do not the build still ships,
-unsigned. The Windows installers come from a second workflow on the same tag;
-see [Windows](#windows) below.
+a universal (Apple silicon + Intel) `.app` on a Blacksmith Mac, wraps it in a
+`.dmg` and a zip, and attaches both to the GitHub Release for the tag. Tag
+releases require the Apple signing and notarization secrets. The app and the
+disk image are signed with the Developer ID certificate, notarized through the
+App Store Connect API key, and stapled before upload. The Windows installers
+come from a second workflow on the same tag; see [Windows](#windows) below.
 
 ## Cut a release
 
@@ -53,9 +52,9 @@ Two places, same files:
 
 ## Re-run a release
 
-`workflow_dispatch` takes an optional `tag` input. Start it with an existing
-tag to rebuild that tag and replace the files on its release. This is how to
-rebuild a release after a workflow fix, with no new tag:
+`workflow_dispatch` takes an optional `tag` input and an `unsigned` boolean.
+Start it with an existing tag to rebuild that tag and replace the files on its
+release. This is how to rebuild a release after a workflow fix, with no new tag:
 
 ```bash
 gh workflow run release.yml --repo getainode/ainode-desktop -f tag=v0.1.1
@@ -66,16 +65,16 @@ file under the same name has a different hash, and the `.sha256` on the
 release changes with it.
 
 Started without a tag it builds the current branch and only uploads workflow
-artifacts, which is the way to smoke-test the pipeline.
+artifacts, which is the way to smoke-test the pipeline. Set `unsigned=true`
+only when that manual smoke test deliberately should not use Apple credentials.
+Tag pushes have no unsigned mode.
 
 ## Signing and notarization
 
 The workflow signs with the Developer ID certificate and notarizes through an
-App Store Connect API key. Both switch on by themselves when the repository
-secrets below exist, and a repo with no secrets builds unsigned rather than
-failing. Tauri reads the `APPLE_*` names straight from the environment; the
-workflow only exports each one when it is set, because an empty
-`APPLE_CERTIFICATE` makes the bundler try to import an empty certificate.
+App Store Connect API key. Every secret below is required unless a manual
+dispatch explicitly sets `unsigned=true`; missing credentials otherwise fail
+before the build. Tauri reads the `APPLE_*` names straight from the environment.
 
 | Secret | What it is | Bitwarden source |
 | --- | --- | --- |
@@ -87,14 +86,14 @@ workflow only exports each one when it is set, because an empty
 | `APPLE_API_ISSUER` | The App Store Connect issuer id, a UUID | `titanium-bot-ci`, in the notes under "Issuer ID" |
 | `APPLE_API_KEY_B64` | The API key's `.p8` file, base64 encoded on one line | `titanium-bot-ci`, attachment `AuthKey_<KEY_ID>.p8` |
 
-Signing needs the first three. Notarization needs signing plus the three
-`APPLE_API_*` secrets; with only the signing three the app is signed but not
-notarized and the run prints a warning. `APPLE_TEAM_ID` is passed through when
-present; Tauri only requires it on the Apple ID route, which this workflow
-does not use (there is no app-specific password in the vault, and the API key
-does not expire when an Apple ID password changes). The certificate expires in
-February 2027 ("Apple Developer", field `CERT_EXPIRES`); after that, export a
-new one and replace `APPLE_CERTIFICATE`.
+Signing uses the first three secrets. Notarization uses those plus the three
+`APPLE_API_*` secrets. The workflow requires all six together so a release
+cannot degrade to signed but unnotarized or fully unsigned. `APPLE_TEAM_ID` is
+passed through when present; Tauri only requires it on the Apple ID route,
+which this workflow does not use (there is no app-specific password in the
+vault, and the API key does not expire when an Apple ID password changes). The
+certificate expires in February 2027 ("Apple Developer", field
+`CERT_EXPIRES`); after that, export a new one and replace `APPLE_CERTIFICATE`.
 
 ### What the workflow does with them
 
@@ -113,9 +112,10 @@ new one and replace `APPLE_CERTIFICATE`.
 4. Notarizes and staples the `.dmg` itself. Tauri signs the image but does not
    notarize it, and a disk image with no ticket of its own is held by
    Gatekeeper on a Mac that cannot reach Apple at that moment.
-5. Verifies before anything is uploaded: `codesign --verify --deep --strict`,
-   `spctl --assess` on the app and the image (both must report
-   `source=Notarized Developer ID`), and `xcrun stapler validate` on both.
+5. Verifies before anything is uploaded: `codesign --verify --strict --deep`,
+   the exact TeamIdentifier `F2DH8T4BVH`, `spctl --assess` on the app and the
+   image (both must report `source=Notarized Developer ID`), and
+   `xcrun stapler validate` on both.
 6. Deletes the key file and the keychain, whatever happened.
 
 ### Where the material lives
@@ -250,7 +250,7 @@ does.
 
 The Windows pipeline is `.github/workflows/release-windows.yml`. It runs on
 the same triggers as the macOS one (every `v*` tag, and `workflow_dispatch`
-with the optional `tag` input), builds the x64 installers on a GitHub-hosted
+with the optional `tag` input), builds the x64 installers on a Blacksmith
 Windows runner, and attaches them to the same GitHub Release:
 
 - `AINode_<version>_x64-setup.exe`: the NSIS installer. Per-user install, no
