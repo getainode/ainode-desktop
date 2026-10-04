@@ -1,9 +1,9 @@
 name: Release
 
 # Builds the universal macOS app on every v* tag and attaches the .dmg and a
-# zipped .app to the GitHub Release for that tag. Signing and notarization
-# switch on by themselves when the Apple secrets exist (see docs/RELEASING.md);
-# without them the build still succeeds and ships unsigned.
+# zipped .app to the GitHub Release for that tag. Tag releases require signing
+# and notarization credentials (see docs/RELEASING.md). Only a manual dispatch
+# can explicitly opt into an unsigned build.
 #
 # Signing: the Developer ID certificate (APPLE_CERTIFICATE, a base64 .p12) is
 # imported into a throwaway keychain that lives as long as the job, and Tauri
@@ -24,6 +24,11 @@ on:
         description: "Existing tag to build and attach to its release (blank: build the current branch, artifacts only)"
         required: false
         default: ""
+      unsigned:
+        description: "Build unsigned (manual dispatch only)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -39,7 +44,7 @@ env:
 jobs:
   macos:
     name: macOS universal
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-latest
     timeout-minutes: 90
 
     steps:
@@ -99,11 +104,10 @@ jobs:
           fi
 
       # The secrets context cannot be read in a step's `if`, so this step turns
-      # "which secrets exist" into two outputs the later steps key off. Signing
-      # needs the certificate, its password and the identity; notarization
-      # needs signing plus the three App Store Connect key parts. Two parts out
-      # of three would be a submission that fails after the build instead of
-      # before it, so it is all three or none.
+      # the release policy into outputs the later steps key off. A tag push must
+      # have every signing and notarization secret. A manual dispatch may opt
+      # out explicitly with unsigned=true; missing credentials never imply an
+      # unsigned build.
       - name: Decide whether this run signs and notarizes
         id: gate
         env:
@@ -113,14 +117,26 @@ jobs:
           API_KEY: ${{ secrets.APPLE_API_KEY }}
           API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+          UNSIGNED_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.unsigned == true }}
         run: |
           set -euo pipefail
-          sign=false
-          notarize=false
-          if [ -n "${CERT}" ] && [ -n "${CERT_PASSWORD}" ] && [ -n "${IDENTITY}" ]; then
+          missing=()
+          [ -n "${CERT}" ] || missing+=(APPLE_CERTIFICATE)
+          [ -n "${CERT_PASSWORD}" ] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+          [ -n "${IDENTITY}" ] || missing+=(APPLE_SIGNING_IDENTITY)
+          [ -n "${API_KEY}" ] || missing+=(APPLE_API_KEY)
+          [ -n "${API_ISSUER}" ] || missing+=(APPLE_API_ISSUER)
+          [ -n "${API_KEY_B64}" ] || missing+=(APPLE_API_KEY_B64)
+
+          if [ "${UNSIGNED_REQUESTED}" = true ]; then
+            sign=false
+            notarize=false
+            echo "Manual dispatch explicitly requested an unsigned build."
+          elif [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::Signed release credentials are incomplete. Missing: ${missing[*]}. Tag releases cannot be unsigned; for a manual test build, dispatch this workflow with unsigned=true."
+            exit 1
+          else
             sign=true
-          fi
-          if [ "${sign}" = true ] && [ -n "${API_KEY}" ] && [ -n "${API_ISSUER}" ] && [ -n "${API_KEY_B64}" ]; then
             notarize=true
           fi
           {
@@ -128,11 +144,6 @@ jobs:
             echo "notarize=${notarize}"
           } >> "$GITHUB_OUTPUT"
           echo "Signing: ${sign}  Notarization: ${notarize}"
-          if [ "${sign}" != true ]; then
-            echo "::warning::APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD or APPLE_SIGNING_IDENTITY is not set. Building unsigned. Users must right-click Open (or use Privacy and Security, Open Anyway) the first time."
-          elif [ "${notarize}" != true ]; then
-            echo "::warning::APPLE_API_KEY, APPLE_API_ISSUER or APPLE_API_KEY_B64 is missing: the app will be signed but not notarized, and Gatekeeper will still hold the download."
-          fi
 
       # A throwaway keychain that lives as long as the job. Its password is
       # generated here rather than kept as a secret: a secret whose only job is
@@ -273,31 +284,36 @@ jobs:
           xcrun stapler staple "${dmg}"
           echo "stapled $(basename "${dmg}")"
 
-      # Hard gate on a signing run: the artifact only ships if macOS itself
-      # accepts it. spctl is the check Gatekeeper performs on a user's machine,
-      # and "accepted" alone is not enough: a signed-but-never-submitted build
-      # reports "source=Unnotarized Developer ID" and would trip Gatekeeper.
-      # Only "source=Notarized Developer ID" passes.
-      - name: Verify the signature and the notarization ticket
+      # Publication gate: a signed build must have the expected Developer ID
+      # team, pass Gatekeeper as notarized and carry a stapled ticket. The only
+      # bypass is the explicit unsigned=true manual dispatch handled above.
+      - name: Gate signed and notarized artifacts
         if: steps.gate.outputs.sign == 'true'
-        env:
-          NOTARIZED: ${{ steps.gate.outputs.notarize }}
         run: |
           set -euo pipefail
           app="$(find "${BUNDLE_DIR}/macos" -maxdepth 1 -name '*.app' | head -n 1)"
           dmg="$(find "${BUNDLE_DIR}/dmg" -maxdepth 1 -name '*.dmg' | head -n 1)"
+          if [ -z "${app}" ] || [ -z "${dmg}" ]; then
+            echo "::error::Bundle output not found under ${BUNDLE_DIR}"
+            exit 1
+          fi
           echo "=== codesign --verify ${app} ==="
-          codesign --verify --deep --strict --verbose=2 "${app}"
-          codesign -dv --verbose=4 "${app}" 2>&1 | grep -E 'Authority|TeamIdentifier|flags'
+          codesign --verify --strict --deep --verbose=2 "${app}"
+          codesign_details="$(codesign -dv --verbose=4 "${app}" 2>&1)"
+          echo "${codesign_details}" | grep -E 'Authority|TeamIdentifier|flags|Signature'
+          if echo "${codesign_details}" | grep -q '^Signature=adhoc$'; then
+            echo "::error::The app has an ad hoc signature."
+            exit 1
+          fi
+          if ! echo "${codesign_details}" | grep -q '^TeamIdentifier=F2DH8T4BVH$'; then
+            echo "::error::The app is not signed by the expected team F2DH8T4BVH."
+            exit 1
+          fi
           echo "=== codesign --verify ${dmg} ==="
           codesign --verify --strict --verbose=2 "${dmg}"
-          if [ "${NOTARIZED}" != "true" ]; then
-            echo "Signed but not notarized, so Gatekeeper is not checked here."
-            exit 0
-          fi
           fail=0
           echo "=== spctl ${app} ==="
-          out="$(spctl --assess --type execute -vv "${app}" 2>&1)" || fail=1
+          out="$(spctl -a -vv "${app}" 2>&1)" || fail=1
           echo "${out}"
           printf '%s' "${out}" | grep -q 'source=Notarized Developer ID' || { echo "::error::The app is not notarized (expected source=Notarized Developer ID)."; fail=1; }
           echo "=== stapler validate ${app} ==="
